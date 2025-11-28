@@ -325,25 +325,25 @@ class RazorpaySettings(Document):
 		return kwargs
 
 	def get_payment_url(self, **kwargs):
+		order = {}
 		if not kwargs.get("order_id"):
 			order = self.create_order(**kwargs)
 			kwargs.update({"order_id": order.get("id")})
-
-		integration_request = create_request_log(kwargs, service_name="Razorpay")
-		return get_url(f"./razorpay_checkout?token={integration_request.name}")
+		integration_request_name = order.get("integration_request") or kwargs.get("integration_request")		
+		return get_url(f"./razorpay_checkout?token={integration_request_name}")
 
 	def create_order(self, **kwargs):
 		# Creating Orders https://razorpay.com/docs/api/orders/
 
 		# convert rupees to paisa
-		kwargs["amount"] = int(kwargs["amount"] * 100)
-
+		amount = int(kwargs["amount"] * 100)
+		
 		# Create integration log
 		integration_request = create_request_log(kwargs, service_name="Razorpay")
 
 		# Setup payment options
 		payment_options = {
-			"amount": kwargs.get("amount"),
+			"amount": amount,
 			"currency": kwargs.get("currency", "INR"),
 			"receipt": kwargs.get("receipt"),
 			"payment_capture": kwargs.get("payment_capture"),
@@ -358,6 +358,8 @@ class RazorpaySettings(Document):
 					),
 					data=payment_options,
 				)
+				kwargs.update({"order_id": order.get("id")})
+				integration_request.update_status(kwargs, "Queued")
 				integration_request.db_set("output", get_json({"order": order}))
 				order["integration_request"] = integration_request.name
 				return order  # Order returned to be consumed by razorpay.js
@@ -392,7 +394,6 @@ class RazorpaySettings(Document):
 		until it is explicitly captured by merchant.
 		"""
 		data = json.loads(self.integration_request.data)
-		output = json.loads(self.integration_request.output or "{}")
 		settings = self.get_settings(data)
 
 		try:
@@ -401,7 +402,7 @@ class RazorpaySettings(Document):
 				auth=(settings.api_key, settings.api_secret),
 			)
 
-			if resp.get('order_id') != output.get("order", {}).get('id',""):
+			if resp.get('order_id') != data.get("order_id"):
 				frappe.throw(_("Order ID mismatch"))
 
 			if resp.get("status") == "authorized":
