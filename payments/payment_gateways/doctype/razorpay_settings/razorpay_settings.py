@@ -465,6 +465,7 @@ class RazorpaySettings(Document):
 			{
 				"api_key": self.api_key,
 				"api_secret": self.get_password(fieldname="api_secret", raise_exception=False),
+				"webhook_secret": self.get_password(fieldname="webhook_secret", raise_exception=False),
 			}
 		)
 
