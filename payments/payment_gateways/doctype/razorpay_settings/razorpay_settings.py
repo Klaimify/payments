@@ -358,6 +358,8 @@ class RazorpaySettings(Document):
 					),
 					data=payment_options,
 				)
+				kwargs.update({"order_id": order.get("id")})
+				integration_request.update_status(kwargs, "Queued")
 				integration_request.db_set("output", get_json({"order": order}))
 				order["integration_request"] = integration_request.name
 				return order  # Order returned to be consumed by razorpay.js
@@ -392,7 +394,6 @@ class RazorpaySettings(Document):
 		until it is explicitly captured by merchant.
 		"""
 		data = json.loads(self.integration_request.data)
-		output = json.loads(self.integration_request.output or "{}")
 		settings = self.get_settings(data)
 
 		try:
@@ -401,7 +402,7 @@ class RazorpaySettings(Document):
 				auth=(settings.api_key, settings.api_secret),
 			)
 
-			if resp.get('order_id') != output.get("order", {}).get('id',""):
+			if resp.get('order_id') != data.get("order_id"):
 				frappe.throw(_("Order ID mismatch"))
 
 			if resp.get("status") == "authorized":
