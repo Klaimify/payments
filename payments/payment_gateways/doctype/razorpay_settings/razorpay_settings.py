@@ -512,14 +512,13 @@ class RazorpaySettings(Document):
 		self.save()
 
 	@staticmethod
-	def build_embedded_checkout_url(api_key, order_id, callback_url, cancel_url, 
+	def build_embedded_checkout_url(self, order_id, callback_url, cancel_url, 
 									prefill_name=None, prefill_email=None, prefill_contact=None, 
 									**additional_params):
 		"""
 		Build Razorpay embedded checkout URL with customizable parameters
 		
 		Args:
-			api_key (str): Razorpay API key
 			order_id (str): Razorpay order ID
 			callback_url (str): Success callback URL
 			cancel_url (str): Cancel/failure callback URL  
@@ -539,7 +538,7 @@ class RazorpaySettings(Document):
 			
 			# Build form data
 			form_data = {
-				'key_id': api_key,
+				'key_id': self.api_key,
 				'order_id': order_id,
 				'callback_url': callback_url,
 				'cancel_url': cancel_url,
