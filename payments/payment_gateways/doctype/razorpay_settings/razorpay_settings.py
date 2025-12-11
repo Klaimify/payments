@@ -511,6 +511,63 @@ class RazorpaySettings(Document):
 		self.flags.ignore_mandatory = True
 		self.save()
 
+	@staticmethod
+	def build_embedded_checkout_url(api_key, order_id, callback_url, cancel_url, 
+									prefill_name=None, prefill_email=None, prefill_contact=None, 
+									**additional_params):
+		"""
+		Build Razorpay embedded checkout URL with customizable parameters
+		
+		Args:
+			api_key (str): Razorpay API key
+			order_id (str): Razorpay order ID
+			callback_url (str): Success callback URL
+			cancel_url (str): Cancel/failure callback URL  
+			prefill_name (str, optional): Prefill customer name
+			prefill_email (str, optional): Prefill customer email
+			prefill_contact (str, optional): Prefill customer contact
+			**additional_params: Any additional form parameters
+			
+		Returns:
+			str: Complete Razorpay embedded checkout URL
+		"""
+		try:
+			from urllib.parse import urlencode
+			
+			# Base URL for Razorpay embedded checkout
+			base_url = "https://api.razorpay.com/v1/checkout/embedded"
+			
+			# Build form data
+			form_data = {
+				'key_id': api_key,
+				'order_id': order_id,
+				'callback_url': callback_url,
+				'cancel_url': cancel_url,
+				'redirect': 'true'
+			}
+			
+			# Add prefill data if provided
+			if prefill_name:
+				form_data['prefill[name]'] = prefill_name
+			if prefill_email:
+				form_data['prefill[email]'] = prefill_email
+			if prefill_contact:
+				form_data['prefill[contact]'] = prefill_contact
+			
+			# Add any additional parameters
+			form_data.update(additional_params)
+			
+			# Create final URL
+			checkout_url = f"{base_url}?{urlencode(form_data)}"
+			
+			frappe.logger().debug(f"Built Razorpay checkout URL: {checkout_url}")
+			return checkout_url
+			
+		except Exception as e:
+			frappe.log_error(frappe.get_traceback(), "Error building Razorpay checkout URL")
+			frappe.throw(_("Failed to build payment checkout URL: {0}").format(str(e)))
+
+
 
 def capture_payment(is_sandbox=False, sanbox_response=None):
 	"""
