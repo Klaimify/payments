@@ -541,8 +541,8 @@ class RazorpaySettings(Document):
 		self.flags.ignore_mandatory = True
 		self.save()
 
-	@staticmethod
 	def build_embedded_checkout_url(self, order_id, callback_url, cancel_url, 
+									description=None, name=None, image=None,
 									prefill_name=None, prefill_email=None, prefill_contact=None, 
 									**additional_params):
 		"""
@@ -551,7 +551,10 @@ class RazorpaySettings(Document):
 		Args:
 			order_id (str): Razorpay order ID
 			callback_url (str): Success callback URL
-			cancel_url (str): Cancel/failure callback URL  
+			cancel_url (str): Cancel/failure callback URL
+			description (str, optional): Custom description to show on checkout page
+			name (str, optional): Merchant/business name to display
+			image (str, optional): URL to merchant logo/image
 			prefill_name (str, optional): Prefill customer name
 			prefill_email (str, optional): Prefill customer email
 			prefill_contact (str, optional): Prefill customer contact
@@ -574,6 +577,14 @@ class RazorpaySettings(Document):
 				'cancel_url': cancel_url,
 				'redirect': 'true'
 			}
+			
+			# Add custom branding if provided
+			if description:
+				form_data['description'] = description
+			if name:
+				form_data['name'] = name
+			if image:
+				form_data['image'] = image
 			
 			# Add prefill data if provided
 			if prefill_name:
