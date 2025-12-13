@@ -543,10 +543,10 @@ class RazorpaySettings(Document):
 
 	def build_embedded_checkout_url(self, order_id, callback_url, cancel_url, 
 									description=None, name=None, image=None,
-									prefill_name=None, prefill_email=None, prefill_contact=None, 
-									**additional_params):
+									prefill_name=None, prefill_email=None, prefill_contact=None,
+									return_form_data=False, **additional_params):
 		"""
-		Build Razorpay embedded checkout URL with customizable parameters
+		Build Razorpay embedded checkout URL or form data with customizable parameters
 		
 		Args:
 			order_id (str): Razorpay order ID
@@ -558,10 +558,11 @@ class RazorpaySettings(Document):
 			prefill_name (str, optional): Prefill customer name
 			prefill_email (str, optional): Prefill customer email
 			prefill_contact (str, optional): Prefill customer contact
+			return_form_data (bool, optional): If True, return form data for POST submission
 			**additional_params: Any additional form parameters
 			
 		Returns:
-			str: Complete Razorpay embedded checkout URL
+			str or dict: Complete Razorpay embedded checkout URL or form data structure
 		"""
 		try:
 			from urllib.parse import urlencode
@@ -597,11 +598,20 @@ class RazorpaySettings(Document):
 			# Add any additional parameters
 			form_data.update(additional_params)
 			
-			# Create final URL
-			checkout_url = f"{base_url}?{urlencode(form_data)}"
-			
-			frappe.logger().debug(f"Built Razorpay checkout URL: {checkout_url}")
-			return checkout_url
+			if return_form_data:
+				# Return form data structure for POST submission
+				form_structure = {
+					'action': base_url,
+					'method': 'POST',
+					'fields': form_data
+				}
+				frappe.logger().debug(f"Built Razorpay form data: {form_structure}")
+				return form_structure
+			else:
+				# Create final URL for GET method (backward compatibility)
+				checkout_url = f"{base_url}?{urlencode(form_data)}"
+				frappe.logger().debug(f"Built Razorpay checkout URL: {checkout_url}")
+				return checkout_url
 			
 		except Exception as e:
 			frappe.log_error(frappe.get_traceback(), "Error building Razorpay checkout URL")
