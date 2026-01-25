@@ -28,11 +28,20 @@ def webhook_handler():
 			handle_payment_webhook(data)
 		elif event.startswith("refund."):
 			handle_refund_webhook(data)
+		elif event.startswith("settlement."):
+			# Enqueue settlement processing to avoid timeout
+			frappe.enqueue(
+				method="payments.webhook.razorpay.handle_settlement_webhook",
+				queue="short",
+				timeout=300,
+				data=data,
+			)
+			frappe.logger().info(f"Settlement webhook enqueued for processing: {data.get('payload', {}).get('settlement', {}).get('entity', {}).get('id')}")
 
 		return {"status": "Success"}
 
 	except Exception as e:
-		frappe.logger().error(f"Razorpay Webhook Error: {frappe.get_traceback()}")
+		frappe.log_error(frappe.get_traceback(), "Razorpay Webhook Error")
 		return {"status": "Failed", "error": str(e)}
 	finally:
 		frappe.set_user(original_user)
@@ -60,6 +69,13 @@ def handle_payment_webhook(data):
 		ref_doc = frappe.get_doc("Integration Request", ref_integration)
 		ref_data = json.loads(ref_doc.data)
 		update_events(ref_doc, data)
+		
+		# Store payment_id in output for settlement tracking
+		if payment.get("id"):
+			output = json.loads(ref_doc.output) if ref_doc.output else {}
+			output["payment_id"] = payment.get("id")
+			ref_doc.db_set("output", get_json(output))
+		
 		if ref_doc.status == "Queued":
 			if status == "captured":
 				ref_doc.update_status(ref_data, "Completed")
@@ -104,6 +120,142 @@ def update_events(integration_request, data):
 	events.append(data)
 	output["events"] = events
 	integration_request.db_set("output", get_json(output))
+
+
+def handle_settlement_webhook(data):
+	"""Handle settlement related webhook events"""
+	settlement = data.get("payload", {}).get("settlement", {}).get("entity", {})
+	settlement_id = settlement.get("id")
+	status = settlement.get("status")
+
+	if not settlement_id or status != "processed":
+		return
+
+	# Get settlement date - Razorpay provides created_at timestamp
+	# Convert Unix timestamp to datetime
+	import datetime
+	try:
+		settlement_timestamp = settlement.get("created_at")
+		if not settlement_timestamp:
+			frappe.logger().warning(f"No created_at timestamp in settlement {settlement_id}")
+			return
+		
+		# Convert Unix timestamp to datetime
+		settlement_date = datetime.datetime.fromtimestamp(settlement_timestamp)
+		year = settlement_date.year
+		month = settlement_date.month
+		day = settlement_date.day
+		
+		frappe.logger().info(
+			f"Processing settlement {settlement_id} for date {year}-{month:02d}-{day:02d}"
+		)
+	except Exception as e:
+		frappe.log_error(f"Error parsing settlement date: {str(e)}", "Settlement Webhook")
+		return
+
+	# Get Razorpay settings to fetch settlement transactions
+	razorpay_settings = frappe.get_doc("Razorpay Settings")
+	settlement_items = razorpay_settings.fetch_settlement_transactions(year, month, day)
+
+	if not settlement_items:
+		return
+
+	# Filter items for this specific settlement_id
+	settlement_items = [item for item in settlement_items if item.get("settlement_id") == settlement_id]
+	
+	if not settlement_items:
+		frappe.logger().warning(
+			f"No settlement items found for settlement_id {settlement_id} on date {year}-{month:02d}-{day:02d}"
+		)
+		return
+	
+	frappe.logger().info(
+		f"Found {len(settlement_items)} items for settlement {settlement_id}"
+	)
+
+	# Process each payment in the settlement
+	processed_count = 0
+	failed_count = 0
+	
+	for item in settlement_items:
+		if item.get("type") != "payment":
+			frappe.logger().debug(f"Skipping non-payment item: {item.get('type')}")
+			continue
+
+		entity_id = item.get("entity_id")
+		if not entity_id:
+			frappe.logger().warning("Settlement item missing entity_id")
+			continue
+
+		frappe.logger().info(
+			f"Processing settlement item - Payment ID: {entity_id}, "
+			f"Amount: {item.get('amount')}, "
+			f"Settled: {item.get('settled')}, "
+			f"UTR: {item.get('settlement_utr')}"
+		)
+
+		# Find integration request by payment_id stored in output
+		integration_requests = frappe.get_all(
+			"Integration Request",
+			filters={
+				"integration_request_service": "Razorpay",
+				"status": "Completed",
+				"output": ("like", f"%{entity_id}%"),
+			},
+			fields=["name"],
+		)
+		
+		if not integration_requests:
+			frappe.logger().warning(f"No Integration Request found for payment_id: {entity_id}")
+			failed_count += 1
+			continue
+
+		for integration_request in integration_requests:
+			try:
+				ref_doc = frappe.get_doc("Integration Request", integration_request.name)
+				
+				# Update events with settlement data
+				update_events(ref_doc, data)
+
+				# Call on_payment_settlement on reference doctype
+				if ref_doc.reference_doctype and ref_doc.reference_docname:
+					ref_doctype_doc = frappe.get_doc(ref_doc.reference_doctype, ref_doc.reference_docname)
+					if hasattr(ref_doctype_doc, "on_payment_settlement"):
+						settlement_data = {
+							"settlement_id": settlement_id,
+							"payment_id": entity_id,
+							"utr": item.get("settlement_utr") or settlement.get("utr"),
+							"settled": item.get("settled"),
+							"amount": item.get("amount"),
+							"currency": item.get("currency"),
+							"settled_at": item.get("settled_at"),
+							"settlement_data": item,
+						}
+						ref_doctype_doc.run_method("on_payment_settlement", settlement_data)
+						processed_count += 1
+						frappe.logger().info(
+							f"Successfully processed settlement for {ref_doc.reference_doctype} "
+							f"{ref_doc.reference_docname}"
+						)
+					else:
+						frappe.logger().warning(
+							f"{ref_doc.reference_doctype} does not have on_payment_settlement method"
+						)
+						failed_count += 1
+				else:
+					frappe.logger().warning(f"Integration Request {ref_doc.name} has no reference document")
+					failed_count += 1
+			except Exception as e:
+				frappe.log_error(
+					f"Error processing settlement for payment {entity_id}: {str(e)}", 
+					"Settlement Webhook"
+				)
+				failed_count += 1
+	
+	frappe.logger().info(
+		f"Settlement {settlement_id} processing complete: "
+		f"{processed_count} succeeded, {failed_count} failed"
+	)
 
 
 def update_payment_status(integration_request, status):

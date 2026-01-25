@@ -504,8 +504,14 @@ class RazorpaySettings(Document):
 
 		return result
 
-	def fetch_settlement_transactions(self, settlement_id):
-		"""Fetch settlement transactions from Razorpay API"""
+	def fetch_settlement_transactions(self, year, month, day):
+		"""Fetch settlement transactions from Razorpay API by date
+		
+		Args:
+			year (int): Year of settlement
+			month (int): Month of settlement (1-12)
+			day (int): Day of settlement (1-31)
+		"""
 		try:
 			api_key = self.api_key
 			api_secret = self.get_password(fieldname="api_secret", raise_exception=False)
@@ -514,20 +520,20 @@ class RazorpaySettings(Document):
 				frappe.logger().warning("Razorpay API credentials not configured")
 				return []
 			
-			# Fetch payments for the settlement
-			# Razorpay API endpoint: GET /v1/settlements/{settlement_id}/recon/combined
+			# Fetch settlements for the specified date
+			# Razorpay API endpoint: GET /v1/settlements/recon/combined?year=YYYY&month=MM&day=DD
 			settlement_transactions_resp = make_get_request(
-				f"https://api.razorpay.com/v1/settlements/{settlement_id}/recon/combined",
+				f"https://api.razorpay.com/v1/settlements/recon/combined?year={year}&month={month:02d}&day={day:02d}",
 				auth=(api_key, api_secret)
 			)
 			
 			if not settlement_transactions_resp or not settlement_transactions_resp.get("items"):
-				frappe.logger().info(f"No transactions found for settlement {settlement_id} in Razorpay API")
+				frappe.logger().info(f"No transactions found for date {year}-{month:02d}-{day:02d} in Razorpay API")
 				return []
 			
 			# Return raw settlement transaction items from Razorpay API
 			items = settlement_transactions_resp.get("items", [])
-			frappe.logger().info(f"Fetched {len(items)} settlement items from Razorpay API for settlement {settlement_id}")
+			frappe.logger().info(f"Fetched {len(items)} settlement items from Razorpay API for date {year}-{month:02d}-{day:02d}")
 			return items
 			
 		except Exception as e:
