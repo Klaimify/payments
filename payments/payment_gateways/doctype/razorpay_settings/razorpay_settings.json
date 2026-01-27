@@ -33,6 +33,7 @@
    "label": "Redirect To"
   },
   {
+   "description": "Webhook URL: {{BASE_URL}}/api/method/payments.webhook.razorpay.webhook_handler",
    "fieldname": "webhook_secret",
    "fieldtype": "Password",
    "label": "Webhook Secret"
@@ -42,7 +43,7 @@
  "in_create": 1,
  "issingle": 1,
  "links": [],
- "modified": "2025-12-05 14:59:48.071438",
+ "modified": "2026-01-27 13:38:43.145677",
  "modified_by": "Administrator",
  "module": "Payment Gateways",
  "name": "Razorpay Settings",
