@@ -798,3 +798,228 @@ def validate_payment_callback(data):
 
 def handle_subscription_notification(doctype, docname):
 	call_hook_method("handle_subscription_notification", doctype=doctype, docname=docname)
+
+
+def check_missed_settlement_webhooks():
+	"""
+	Cron job to check for missed settlement webhooks.
+	Runs every 6 hours to fetch recent settlements and process any that weren't 
+	captured by webhooks.
+	"""
+	import datetime
+	
+	frappe.logger().info("Starting missed settlement webhook check")
+	
+	try:
+		# Get Razorpay settings
+		razorpay_settings = frappe.get_doc("Razorpay Settings")
+		
+		# Check settlements for the last 7 days to catch any missed webhooks
+		today = datetime.datetime.now()
+		processed_settlements = 0
+		skipped_settlements = 0
+		
+		for days_back in range(7):
+			check_date = today - datetime.timedelta(days=days_back)
+			year = check_date.year
+			month = check_date.month
+			day = check_date.day
+			
+			frappe.logger().info(
+				f"Checking settlements for {year}-{month:02d}-{day:02d}"
+			)
+			
+			# Fetch settlement transactions for this date
+			settlement_items = razorpay_settings.fetch_settlement_transactions(year, month, day)
+			
+			if not settlement_items:
+				continue
+			
+			# Get all unique settlement IDs from the items
+			settlement_ids = set()
+			for item in settlement_items:
+				if item.get("settlement_id"):
+					settlement_ids.add(item.get("settlement_id"))
+			
+			# For each settlement, check if it has been processed
+			for settlement_id in settlement_ids:
+				if is_settlement_already_processed(settlement_id):
+					frappe.logger().debug(
+						f"Settlement {settlement_id} already processed, skipping"
+					)
+					skipped_settlements += 1
+					continue
+				
+				# Settlement not processed, process it now
+				frappe.logger().info(
+					f"Processing missed settlement {settlement_id} from {year}-{month:02d}-{day:02d}"
+				)
+				
+				# Create a webhook data structure similar to what Razorpay sends
+				webhook_data = {
+					"event": "settlement.processed",
+					"payload": {
+						"settlement": {
+							"entity": {
+								"id": settlement_id,
+								"status": "processed",
+								"created_at": int(check_date.timestamp())
+							}
+						}
+					}
+				}
+				
+				# Enqueue settlement processing
+				frappe.enqueue(
+					method="payments.webhook.razorpay.handle_settlement_webhook",
+					queue="short",
+					timeout=300,
+					data=webhook_data,
+				)
+				
+				processed_settlements += 1
+				
+				# Mark settlement as processed to avoid reprocessing
+				mark_settlement_as_processed(settlement_id)
+		
+		frappe.logger().info(
+			f"Missed settlement check complete: "
+			f"{processed_settlements} settlements queued for processing, "
+			f"{skipped_settlements} already processed"
+		)
+		
+	except Exception as e:
+		frappe.log_error(
+			frappe.get_traceback(), 
+			"Missed Settlement Webhook Check Error"
+		)
+
+
+def is_settlement_already_processed(settlement_id):
+	"""
+	Check if a settlement has already been processed by looking for the 
+	settlement_id in Integration Request output events.
+	"""
+	# Check if any Integration Request has this settlement_id in its events
+	integration_requests = frappe.get_all(
+		"Integration Request",
+		filters={
+			"integration_request_service": "Razorpay",
+			"output": ("like", f'%"settlement_id": "{settlement_id}"%'),
+		},
+		limit=1
+	)
+	
+	if integration_requests:
+		return True
+	
+	# Also check in a custom tracking doctype if you have one
+	# For now, we'll use a simple cache-based approach
+	cache_key = f"razorpay_settlement_processed_{settlement_id}"
+	if frappe.cache().get(cache_key):
+		return True
+	
+	return False
+
+
+def mark_settlement_as_processed(settlement_id):
+	"""
+	Mark a settlement as processed to prevent duplicate processing.
+	Uses cache with 30-day expiration.
+	"""
+	cache_key = f"razorpay_settlement_processed_{settlement_id}"
+	# Cache for 30 days (in seconds)
+	frappe.cache().setex(cache_key, 30 * 24 * 60 * 60, "1")
+
+
+@frappe.whitelist()
+def process_settlements_for_date(date):
+	"""
+	Manually trigger settlement processing for a specific date.
+	Useful for testing or reprocessing missed settlements.
+	
+	Args:
+		date (str): Date in YYYY-MM-DD format
+		
+	Returns:
+		str: Status message
+	"""
+	import datetime
+	
+	try:
+		# Parse the date
+		check_date = datetime.datetime.strptime(date, "%Y-%m-%d")
+		year = check_date.year
+		month = check_date.month
+		day = check_date.day
+		
+		frappe.logger().info(
+			f"Manual settlement check triggered for {year}-{month:02d}-{day:02d}"
+		)
+		
+		# Get Razorpay settings
+		razorpay_settings = frappe.get_doc("Razorpay Settings")
+		
+		# Fetch settlement transactions for this date
+		settlement_items = razorpay_settings.fetch_settlement_transactions(year, month, day)
+		
+		if not settlement_items:
+			return f"No settlement transactions found for {date}"
+		
+		# Get all unique settlement IDs from the items
+		settlement_ids = set()
+		for item in settlement_items:
+			if item.get("settlement_id"):
+				settlement_ids.add(item.get("settlement_id"))
+		
+		if not settlement_ids:
+			return f"No settlement IDs found in transactions for {date}"
+		
+		# Process each settlement
+		processed_count = 0
+		skipped_count = 0
+		
+		for settlement_id in settlement_ids:
+			if is_settlement_already_processed(settlement_id):
+				frappe.logger().info(
+					f"Settlement {settlement_id} already processed, skipping"
+				)
+				skipped_count += 1
+				continue
+			
+			# Create webhook data structure
+			webhook_data = {
+				"event": "settlement.processed",
+				"payload": {
+					"settlement": {
+						"entity": {
+							"id": settlement_id,
+							"status": "processed",
+							"created_at": int(check_date.timestamp())
+						}
+					}
+				}
+			}
+			
+			# Enqueue settlement processing
+			frappe.enqueue(
+				method="payments.webhook.razorpay.handle_settlement_webhook",
+				queue="short",
+				timeout=300,
+				data=webhook_data,
+			)
+			
+			processed_count += 1
+			mark_settlement_as_processed(settlement_id)
+		
+		return (
+			f"Found {len(settlement_items)} transaction(s) in {len(settlement_ids)} settlement(s) for {date}. "
+			f"Queued {processed_count} settlement(s) for processing, {skipped_count} already processed."
+		)
+		
+	except Exception as e:
+		frappe.log_error(
+			frappe.get_traceback(), 
+			f"Manual Settlement Check Error for {date}"
+		)
+		return f"Error processing settlements: {str(e)}"

@@ -12,5 +12,43 @@ frappe.ui.form.on("Razorpay Settings", {
         },
       });
     });
+
+    frm.add_custom_button(__("Check Settlements"), function () {
+      let d = new frappe.ui.Dialog({
+        title: __("Check Settlements for Date"),
+        fields: [
+          {
+            label: __("Settlement Date"),
+            fieldname: "settlement_date",
+            fieldtype: "Date",
+            reqd: 1,
+            default: frappe.datetime.get_today(),
+          },
+        ],
+        primary_action_label: __("Process Settlements"),
+        primary_action(values) {
+          frappe.call({
+            method:
+              "payments.payment_gateways.doctype.razorpay_settings.razorpay_settings.process_settlements_for_date",
+            args: {
+              date: values.settlement_date,
+            },
+            freeze: true,
+            freeze_message: __("Processing settlements..."),
+            callback: function (r) {
+              if (r.message) {
+                frappe.msgprint({
+                  title: __("Settlement Processing"),
+                  indicator: "green",
+                  message: r.message,
+                });
+              }
+            },
+          });
+          d.hide();
+        },
+      });
+      d.show();
+    });
   },
 });
