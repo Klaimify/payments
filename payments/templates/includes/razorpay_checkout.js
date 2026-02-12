@@ -8,6 +8,7 @@ $(document).ready(function(){
 			"description": "{{ description }}",
 			"order_id": "{{ order_id }}",
 			"subscription_id": "{{ subscription_id }}",
+			"order_id": "{{ order_id }}",
 			"handler": function (response){
 				razorpay.make_payment_log(response, options, "{{ reference_doctype }}", "{{ reference_docname }}", "{{ token }}");
 			},
