@@ -550,6 +550,7 @@ class RazorpaySettings(Document):
 	def build_embedded_checkout_url(self, order_id, callback_url, cancel_url, 
 									description=None, name=None, image=None,
 									prefill_name=None, prefill_email=None, prefill_contact=None,
+									readonly_contact=False, readonly_email=False,
 									return_form_data=False, **additional_params):
 		"""
 		Build Razorpay embedded checkout URL or form data with customizable parameters
@@ -564,6 +565,8 @@ class RazorpaySettings(Document):
 			prefill_name (str, optional): Prefill customer name
 			prefill_email (str, optional): Prefill customer email
 			prefill_contact (str, optional): Prefill customer contact
+			readonly_contact (bool, optional): If True, prefilled contact is read-only
+			readonly_email (bool, optional): If True, prefilled email is read-only
 			return_form_data (bool, optional): If True, return form data for POST submission
 			**additional_params: Any additional form parameters
 			
@@ -600,6 +603,9 @@ class RazorpaySettings(Document):
 				form_data['prefill[email]'] = prefill_email
 			if prefill_contact:
 				form_data['prefill[contact]'] = prefill_contact
+			
+			form_data['readonly[email]'] = readonly_email
+			form_data['readonly[contact]'] = readonly_contact
 			
 			# Add any additional parameters
 			form_data.update(additional_params)
