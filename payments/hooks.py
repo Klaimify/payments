@@ -116,6 +116,9 @@ scheduler_events = {
 		"payments.payment_gateways.doctype.razorpay_settings.razorpay_settings.capture_payment",
 	],
 	"cron": {
+		"*/10 * * * *": [
+			"payments.payment_gateways.doctype.razorpay_settings.razorpay_settings.poll_ondemand_settlement_statuses"
+		],
 		"0 22 * * *": [
 			"payments.payment_gateways.doctype.razorpay_settings.razorpay_settings.check_missed_settlement_webhooks"
 		]

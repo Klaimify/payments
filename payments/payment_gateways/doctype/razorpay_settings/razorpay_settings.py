@@ -73,9 +73,14 @@ from frappe.integrations.utils import (
 	make_post_request,
 )
 from frappe.model.document import Document
-from frappe.utils import call_hook_method, cint, get_timestamp, get_url
+from frappe.utils import add_to_date, call_hook_method, cint, get_timestamp, get_url, now_datetime
 from frappe.integrations.utils import get_json
 from payments.utils import create_payment_gateway
+
+
+PENDING_ONDEMAND_IR_CACHE_KEY = "razorpay_ondemand_pending_integration_requests"
+PENDING_ONDEMAND_IR_CACHE_TTL = 7 * 24 * 60 * 60
+SETTLEMENT_ONDEMAND_URL = "https://api.razorpay.com/v1/settlements/ondemand"
 
 
 class RazorpaySettings(Document):
@@ -412,6 +417,7 @@ class RazorpaySettings(Document):
 			elif resp.get("status") == "captured":
 				self.integration_request.update_status(data, "Completed")
 				self.flags.status_changed_to = "Completed"
+				self.process_instant_settlement_on_payment(resp, data)
 
 			elif data.get("subscription_id"):
 				if resp.get("status") == "refunded":
@@ -460,6 +466,117 @@ class RazorpaySettings(Document):
 
 		return {"redirect_to": redirect_url, "status": status}
 
+	def process_instant_settlement_on_payment(self, payment_response, request_data):
+		"""Trigger Razorpay on-demand settlement for captured payments when enabled."""
+		if not cint(getattr(self, "enable_instant_settlement", 0)):
+			return
+
+		settle_full_balance = bool(cint(getattr(self, "settle_full_balance", 0)))
+		amount = cint(payment_response.get("amount"))
+		if amount <= 0 and not settle_full_balance:
+			frappe.logger().warning("Skipping instant settlement: invalid captured amount")
+			return
+
+		settings = self.get_settings(request_data)
+		description = getattr(self, "instant_settlement_description", None) or _(
+			"Instant settlement for captured Razorpay payment"
+		)
+
+		ref_doctype = request_data.get("reference_doctype") or (
+			self.integration_request.reference_doctype if self.integration_request else ""
+		)
+		ref_docname = request_data.get("reference_docname") or (
+			self.integration_request.reference_docname if self.integration_request else ""
+		)
+		payment_ir_name = self.integration_request.name if self.integration_request else ""
+
+		payload = {
+			"settle_full_balance": settle_full_balance,
+			"description": description,
+			"notes": {
+				"integration_request": payment_ir_name,
+				"reference_doctype": ref_doctype,
+				"reference_docname": ref_docname,
+				"razorpay_payment_id": payment_response.get("id") or request_data.get("razorpay_payment_id") or "",
+			},
+		}
+		if not settle_full_balance:
+			payload["amount"] = amount
+
+		# Create a dedicated Integration Request for this settlement call so it can
+		# be tracked separately from the payment IR.
+		settlement_ir = frappe.get_doc({
+			"doctype": "Integration Request",
+			"integration_request_service": "Razorpay",
+			"request_description": "Razorpay On-Demand Settlement",
+			"url": SETTLEMENT_ONDEMAND_URL,
+			"is_remote_request": 1,
+			"status": "Queued",
+			"data": json.dumps(payload),
+			"reference_doctype": ref_doctype,
+			"reference_docname": ref_docname,
+		}).insert(ignore_permissions=True)
+		frappe.db.commit()
+
+		try:
+			response = make_post_request(
+				SETTLEMENT_ONDEMAND_URL,
+				auth=(settings.api_key, settings.api_secret),
+				data=json.dumps(payload),
+				headers={"content-type": "application/json"},
+			)
+
+			if response and response.get("id"):
+				trigger_data = {
+					"id": response.get("id"),
+					"status": response.get("status"),
+					"amount_requested": response.get("amount_requested") or response.get("amount") or amount,
+					"amount_settled": response.get("amount_settled"),
+					"amount_pending": response.get("amount_pending"),
+					"fees": response.get("fees"),
+					"tax": response.get("tax"),
+					"currency": response.get("currency"),
+					"settle_full_balance": settle_full_balance,
+					"created_at": response.get("created_at"),
+					"last_polled_at": None,
+				}
+				settlement_ir.db_set("status", "Completed")
+				settlement_ir.db_set("output", get_json({"ondemand_settlement_trigger": trigger_data}))
+				_add_pending_ondemand_ir(settlement_ir.name)
+
+				# Write a back-reference on the payment IR for traceability.
+				if self.integration_request:
+					try:
+						existing_output = {}
+						if self.integration_request.output:
+							parsed = json.loads(self.integration_request.output)
+							existing_output = parsed if isinstance(parsed, dict) else {"response": parsed}
+						existing_output["ondemand_settlement_ir"] = settlement_ir.name
+						self.integration_request.db_set("output", get_json(existing_output))
+					except Exception:
+						frappe.log_error(frappe.get_traceback(), "Failed to update payment IR with settlement reference")
+
+				frappe.logger().info(
+					f"Instant settlement triggered: {response.get('id')} (settlement IR: {settlement_ir.name})"
+				)
+			else:
+				settlement_ir.db_set("status", "Failed")
+				settlement_ir.db_set("output", get_json({"error": str(response)}))
+				frappe.log_error(message=str(response), title="Razorpay instant settlement failed")
+
+		except Exception as e:
+			error_body = ""
+			if hasattr(e, "response") and e.response is not None:
+				error_body = e.response.text
+			settlement_ir.db_set("status", "Failed")
+			settlement_ir.db_set(
+				"output", get_json({"error": frappe.get_traceback(), "api_response": error_body})
+			)
+			frappe.log_error(
+				f"{frappe.get_traceback()}\n\nAPI Response: {error_body}",
+				"Razorpay instant settlement error",
+			)
+
 	def get_settings(self, data):
 		settings = frappe._dict(
 			{
@@ -478,6 +595,15 @@ class RazorpaySettings(Document):
 			)
 
 		return settings
+
+	def fetch_ondemand_settlement(self, settlement_id, request_data=None):
+		"""Fetch on-demand settlement status by settlement id."""
+		request_data = request_data or {}
+		settings = self.get_settings(request_data)
+		return make_get_request(
+			f"https://api.razorpay.com/v1/settlements/ondemand/{settlement_id}",
+			auth=(settings.api_key, settings.api_secret),
+		)
 
 	def cancel_subscription(self, subscription_id):
 		settings = self.get_settings({})
@@ -670,6 +796,8 @@ def capture_payment(is_sandbox=False, sanbox_response=None):
 
 			if resp.get("status") == "captured":
 				frappe.db.set_value("Integration Request", doc.name, "status", "Completed")
+				controller.integration_request = frappe.get_doc("Integration Request", doc.name)
+				controller.process_instant_settlement_on_payment(resp, data)
 
 		except Exception:
 			doc = frappe.get_doc("Integration Request", doc.name)
@@ -1029,3 +1157,137 @@ def process_settlements_for_date(date):
 			f"Manual Settlement Check Error for {date}"
 		)
 		return f"Error processing settlements: {str(e)}"
+
+
+@frappe.whitelist()
+def poll_ondemand_settlement_statuses():
+	"""Poll initiated on-demand settlements and finalize processed records."""
+	try:
+		from payments.webhook.razorpay import finalize_integration_request_settlement
+
+		razorpay_settings = frappe.get_doc("Razorpay Settings")
+		pending_ir_names = _get_pending_ondemand_ir_names()
+
+		_base_filters = {
+			"integration_request_service": "Razorpay",
+			"status": "Completed",
+			"output": ["like", '%"ondemand_settlement_trigger"%'],
+		}
+
+		if pending_ir_names:
+			integration_requests = frappe.get_all(
+				"Integration Request",
+				filters={**_base_filters, "name": ["in", pending_ir_names[:200]]},
+				or_filters=None,
+				fields=["name", "data", "output", "reference_doctype", "reference_docname"],
+			)
+			# Post-filter in Python since Frappe filters don't support NOT LIKE on the same field twice.
+			integration_requests = [
+				ir for ir in integration_requests
+				if '"settlement_processed"' not in (ir.output or "")
+			]
+		else:
+			# Recovery mode for cache misses: bounded scan of recently modified rows only.
+			integration_requests = frappe.get_all(
+				"Integration Request",
+				filters={
+					**_base_filters,
+					"modified": [">=", add_to_date(now_datetime(), days=-2)],
+				},
+				fields=["name", "data", "output", "reference_doctype", "reference_docname"],
+				limit=100,
+			)
+			integration_requests = [
+				ir for ir in integration_requests
+				if '"settlement_processed"' not in (ir.output or "")
+			]
+
+		for ir in integration_requests:
+			try:
+				output = json.loads(ir.output or "{}")
+				trigger = output.get("ondemand_settlement_trigger") or {}
+				settlement_id = trigger.get("id")
+				if not settlement_id:
+					_remove_pending_ondemand_ir(ir.name)
+					continue
+
+				resp = razorpay_settings.fetch_ondemand_settlement(settlement_id, json.loads(ir.data or "{}"))
+				trigger["status"] = resp.get("status")
+				trigger["amount_requested"] = resp.get("amount_requested")
+				trigger["amount_settled"] = resp.get("amount_settled")
+				trigger["amount_pending"] = resp.get("amount_pending")
+				trigger["fees"] = resp.get("fees")
+				trigger["tax"] = resp.get("tax")
+				trigger["currency"] = resp.get("currency")
+				trigger["created_at"] = resp.get("created_at")
+				trigger["last_polled_at"] = frappe.utils.now()
+				output["ondemand_settlement_trigger"] = trigger
+
+				ir_doc = frappe.get_doc("Integration Request", ir.name)
+				ir_doc.db_set("output", get_json(output))
+
+				if resp.get("status") == "processed":
+					payout_item = (resp.get("ondemand_payouts") or {}).get("items") or []
+					first_payout = payout_item[0] if payout_item else {}
+					settlement_data = {
+						"settlement_id": settlement_id,
+						"payment_id": output.get("payment_id"),
+						"utr": first_payout.get("utr") or resp.get("utr"),
+						"settled": True,
+						"amount": resp.get("amount_settled") or resp.get("amount_requested"),
+						"currency": resp.get("currency"),
+						"settled_at": first_payout.get("processed_at") or resp.get("created_at"),
+						"settlement_data": resp,
+					}
+					finalize_integration_request_settlement(ir_doc, settlement_data, source="poller")
+					_remove_pending_ondemand_ir(ir.name)
+				elif resp.get("status") in ("failed", "cancelled", "reversed"):
+					_remove_pending_ondemand_ir(ir.name)
+
+			except Exception:
+				frappe.log_error(frappe.get_traceback(), f"Failed polling on-demand settlement for Integration Request {ir.name}")
+
+	except Exception:
+		frappe.log_error(frappe.get_traceback(), "On-demand settlement polling job failed")
+
+
+def _get_pending_ondemand_ir_names():
+	raw = frappe.cache().get(PENDING_ONDEMAND_IR_CACHE_KEY)
+	if not raw:
+		return []
+
+	if isinstance(raw, bytes):
+		raw = raw.decode()
+
+	try:
+		names = json.loads(raw)
+	except Exception:
+		return []
+
+	if not isinstance(names, list):
+		return []
+
+	return [name for name in names if isinstance(name, str) and name]
+
+
+def _set_pending_ondemand_ir_names(names):
+	unique_names = sorted(set(name for name in names if name))
+	frappe.cache().setex(
+		PENDING_ONDEMAND_IR_CACHE_KEY,
+		PENDING_ONDEMAND_IR_CACHE_TTL,
+		json.dumps(unique_names),
+	)
+
+
+def _add_pending_ondemand_ir(integration_request_name):
+	names = _get_pending_ondemand_ir_names()
+	if integration_request_name not in names:
+		names.append(integration_request_name)
+		_set_pending_ondemand_ir_names(names)
+
+
+def _remove_pending_ondemand_ir(integration_request_name):
+	names = _get_pending_ondemand_ir_names()
+	if integration_request_name in names:
+		names.remove(integration_request_name)
+		_set_pending_ondemand_ir_names(names)

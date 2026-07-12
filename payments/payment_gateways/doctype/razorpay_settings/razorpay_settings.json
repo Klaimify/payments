@@ -1,71 +1,95 @@
 {
- "actions": [],
- "creation": "2016-09-20 03:44:03.799402",
- "doctype": "DocType",
- "document_type": "System",
- "editable_grid": 1,
- "engine": "InnoDB",
- "field_order": [
-  "api_key",
-  "api_secret",
-  "redirect_to",
-  "webhook_secret"
- ],
- "fields": [
-  {
-   "fieldname": "api_key",
-   "fieldtype": "Data",
-   "in_list_view": 1,
-   "label": "API Key",
-   "reqd": 1
-  },
-  {
-   "fieldname": "api_secret",
-   "fieldtype": "Password",
-   "in_list_view": 1,
-   "label": "API Secret",
-   "reqd": 1
-  },
-  {
-   "description": "Mention transaction completion page URL",
-   "fieldname": "redirect_to",
-   "fieldtype": "Data",
-   "label": "Redirect To"
-  },
-  {
-   "description": "Webhook URL: {{BASE_URL}}/api/method/payments.webhook.razorpay.webhook_handler",
-   "fieldname": "webhook_secret",
-   "fieldtype": "Password",
-   "label": "Webhook Secret"
-  }
- ],
- "grid_page_length": 50,
- "in_create": 1,
- "issingle": 1,
- "links": [],
- "modified": "2026-01-27 13:38:43.145677",
- "modified_by": "Administrator",
- "module": "Payment Gateways",
- "name": "Razorpay Settings",
- "owner": "Administrator",
- "permissions": [
-  {
-   "create": 1,
-   "delete": 1,
-   "email": 1,
-   "export": 1,
-   "print": 1,
-   "read": 1,
-   "role": "System Manager",
-   "share": 1,
-   "write": 1
-  }
- ],
- "read_only": 1,
- "row_format": "Dynamic",
- "rows_threshold_for_grid_search": 20,
- "sort_field": "modified",
- "sort_order": "DESC",
- "states": [],
- "track_changes": 1
+  "actions": [],
+  "creation": "2016-09-20 03:44:03.799402",
+  "doctype": "DocType",
+  "document_type": "System",
+  "editable_grid": 1,
+  "engine": "InnoDB",
+  "field_order": [
+    "api_key",
+    "api_secret",
+    "enable_instant_settlement",
+    "settle_full_balance",
+    "instant_settlement_description",
+    "redirect_to",
+    "webhook_secret"
+  ],
+  "fields": [
+    {
+      "fieldname": "api_key",
+      "fieldtype": "Data",
+      "in_list_view": 1,
+      "label": "API Key",
+      "reqd": 1
+    },
+    {
+      "fieldname": "api_secret",
+      "fieldtype": "Password",
+      "in_list_view": 1,
+      "label": "API Secret",
+      "reqd": 1
+    },
+    {
+      "default": "0",
+      "description": "If enabled, an on-demand settlement is triggered when payment is captured.",
+      "fieldname": "enable_instant_settlement",
+      "fieldtype": "Check",
+      "label": "Enable Instant Settlement"
+    },
+    {
+      "default": "0",
+      "depends_on": "enable_instant_settlement",
+      "fieldname": "settle_full_balance",
+      "fieldtype": "Check",
+      "label": "Settle Full Balance"
+    },
+    {
+      "depends_on": "enable_instant_settlement",
+      "description": "Optional description sent to Razorpay on on-demand settlement.",
+      "fieldname": "instant_settlement_description",
+      "fieldtype": "Data",
+      "label": "Instant Settlement Description"
+    },
+    {
+      "description": "Mention transaction completion page URL",
+      "fieldname": "redirect_to",
+      "fieldtype": "Data",
+      "label": "Redirect To"
+    },
+    {
+      "description": "Webhook URL: {{BASE_URL}}/api/method/payments.webhook.razorpay.webhook_handler",
+      "fieldname": "webhook_secret",
+      "fieldtype": "Password",
+      "label": "Webhook Secret"
+    }
+  ],
+  "grid_page_length": 50,
+  "in_create": 1,
+  "issingle": 1,
+  "links": [],
+  "modified": "2026-01-27 13:38:43.145677",
+  "modified_by": "Administrator",
+  "module": "Payment Gateways",
+  "name": "Razorpay Settings",
+  "owner": "Administrator",
+  "permissions": [
+    {
+      "create": 1,
+      "delete": 1,
+      "email": 1,
+      "export": 1,
+      "print": 1,
+      "read": 1,
+      "role": "System Manager",
+      "share": 1,
+      "write": 1
+    }
+  ],
+  "read_only": 1,
+  "row_format": "Dynamic",
+  "rows_threshold_for_grid_search": 20,
+  "sort_field": "modified",
+  "sort_order": "DESC",
+  "states": [],
+  "track_changes": 1
 }

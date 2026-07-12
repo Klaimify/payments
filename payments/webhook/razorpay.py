@@ -7,8 +7,6 @@ from frappe.integrations.utils import get_json
 @frappe.whitelist(allow_guest=True)
 def webhook_handler():
 	"""Handler for all Razorpay webhook events"""
-	original_user = frappe.session.user
-
 	try:
 		data = frappe.local.form_dict
 
@@ -23,7 +21,6 @@ def webhook_handler():
 
 		# Handle different webhook events
 		event = data.get("event")
-		frappe.set_user("Administrator")
 		if event.startswith("payment."):
 			handle_payment_webhook(data)
 		elif event.startswith("refund."):
@@ -43,8 +40,6 @@ def webhook_handler():
 	except Exception as e:
 		frappe.log_error(frappe.get_traceback(), "Razorpay Webhook Error")
 		return {"status": "Failed", "error": str(e)}
-	finally:
-		frappe.set_user(original_user)
 
 
 def handle_payment_webhook(data):
@@ -120,6 +115,50 @@ def update_events(integration_request, data):
 	events.append(data)
 	output["events"] = events
 	integration_request.db_set("output", get_json(output))
+
+
+def finalize_integration_request_settlement(integration_request, settlement_data, source="webhook"):
+	"""Finalize settlement for an Integration Request in an idempotent way."""
+	latest_output = frappe.db.get_value("Integration Request", integration_request.name, "output")
+	output = json.loads(latest_output) if latest_output else {}
+	processed = output.get("settlement_processed") or {}
+	settlement_id = settlement_data.get("settlement_id")
+
+	if settlement_id and processed.get("settlement_id") == settlement_id:
+		return False
+
+	output["settlement_processed"] = {
+		"settlement_id": settlement_id,
+		"status": "processed",
+		"amount": settlement_data.get("amount"),
+		"currency": settlement_data.get("currency"),
+		"utr": settlement_data.get("utr"),
+		"settled_at": settlement_data.get("settled_at"),
+		"source": source,
+	}
+	integration_request.db_set("output", get_json(output))
+
+	if settlement_id:
+		cache_key = f"razorpay_settlement_processed_{settlement_id}"
+		frappe.cache().setex(cache_key, 30 * 24 * 60 * 60, "1")
+
+	if integration_request.reference_doctype and integration_request.reference_docname:
+		ref_doctype_doc = frappe.get_doc(integration_request.reference_doctype, integration_request.reference_docname)
+		if hasattr(ref_doctype_doc, "on_payment_settlement"):
+			ref_doctype_doc.run_method("on_payment_settlement", settlement_data)
+			frappe.logger().info(
+				f"Successfully processed settlement for {integration_request.reference_doctype} "
+				f"{integration_request.reference_docname}"
+			)
+			return True
+
+		frappe.logger().warning(
+			f"{integration_request.reference_doctype} does not have on_payment_settlement method"
+		)
+		return False
+
+	frappe.logger().warning(f"Integration Request {integration_request.name} has no reference document")
+	return False
 
 
 def handle_settlement_webhook(data):
@@ -217,33 +256,20 @@ def handle_settlement_webhook(data):
 				# Update events with settlement data
 				update_events(ref_doc, data)
 
-				# Call on_payment_settlement on reference doctype
-				if ref_doc.reference_doctype and ref_doc.reference_docname:
-					ref_doctype_doc = frappe.get_doc(ref_doc.reference_doctype, ref_doc.reference_docname)
-					if hasattr(ref_doctype_doc, "on_payment_settlement"):
-						settlement_data = {
-							"settlement_id": settlement_id,
-							"payment_id": entity_id,
-							"utr": item.get("settlement_utr") or settlement.get("utr"),
-							"settled": item.get("settled"),
-							"amount": item.get("amount"),
-							"currency": item.get("currency"),
-							"settled_at": item.get("settled_at"),
-							"settlement_data": item,
-						}
-						ref_doctype_doc.run_method("on_payment_settlement", settlement_data)
-						processed_count += 1
-						frappe.logger().info(
-							f"Successfully processed settlement for {ref_doc.reference_doctype} "
-							f"{ref_doc.reference_docname}"
-						)
-					else:
-						frappe.logger().warning(
-							f"{ref_doc.reference_doctype} does not have on_payment_settlement method"
-						)
-						failed_count += 1
+				settlement_data = {
+					"settlement_id": settlement_id,
+					"payment_id": entity_id,
+					"utr": item.get("settlement_utr") or settlement.get("utr"),
+					"settled": item.get("settled"),
+					"amount": item.get("amount"),
+					"currency": item.get("currency"),
+					"settled_at": item.get("settled_at"),
+					"settlement_data": item,
+				}
+
+				if finalize_integration_request_settlement(ref_doc, settlement_data, source="webhook"):
+					processed_count += 1
 				else:
-					frappe.logger().warning(f"Integration Request {ref_doc.name} has no reference document")
 					failed_count += 1
 			except Exception as e:
 				frappe.log_error(

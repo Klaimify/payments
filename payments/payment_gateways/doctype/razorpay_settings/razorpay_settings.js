@@ -12,7 +12,21 @@ frappe.ui.form.on("Razorpay Settings", {
         },
       });
     });
-
+    frm.add_custom_button(__('Poll On-Demand Settlements'), function () {
+      frappe.call({
+        method:
+          'payments.payment_gateways.doctype.razorpay_settings.razorpay_settings.poll_ondemand_settlement_statuses',
+        freeze: true,
+        freeze_message: __('Polling on-demand settlements...'),
+        callback: function (r) {
+          frappe.msgprint({
+            title: __('On-Demand Settlement Poll'),
+            indicator: 'green',
+            message: __('Poll completed. Check error log for details if any settlements were processed.'),
+          });
+        },
+      });
+    });
     frm.add_custom_button(__("Check Settlements"), function () {
       let d = new frappe.ui.Dialog({
         title: __("Check Settlements for Date"),
