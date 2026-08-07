@@ -85,7 +85,12 @@ SETTLEMENT_ONDEMAND_URL = "https://api.razorpay.com/v1/settlements/ondemand"
 # Freshly captured funds aren't always in Razorpay's available balance yet, so
 # a settlement request can fail right after capture. retry_pending_instant_settlements
 # (cron, every 10 min) re-attempts until this cap is hit.
-MAX_ONDEMAND_SETTLEMENT_ATTEMPTS = 10
+MAX_ONDEMAND_SETTLEMENT_ATTEMPTS = 3
+
+# Razorpay's documented bounds for the on-demand settlement "amount" param, in paise
+# (₹100 to ₹500000000, despite the API error text saying "100").
+MIN_ONDEMAND_SETTLEMENT_AMOUNT = 10000
+MAX_ONDEMAND_SETTLEMENT_AMOUNT = 50000000000
 
 
 class RazorpaySettings(Document):
@@ -495,6 +500,20 @@ class RazorpaySettings(Document):
 			frappe.logger().warning("Skipping instant settlement: invalid captured amount")
 			return
 
+		# Razorpay rejects on-demand settlement requests outside this range; retrying
+		# won't help since the amount never changes, so give up permanently instead
+		# of letting the retry cron hammer the API every 10 min.
+		if not settle_full_balance and not (
+			MIN_ONDEMAND_SETTLEMENT_AMOUNT <= amount <= MAX_ONDEMAND_SETTLEMENT_AMOUNT
+		):
+			frappe.logger().warning(
+				f"Skipping instant settlement: amount {amount} outside Razorpay's allowed range "
+				f"({MIN_ONDEMAND_SETTLEMENT_AMOUNT}-{MAX_ONDEMAND_SETTLEMENT_AMOUNT} paise)"
+			)
+			if payment_ir:
+				self._update_payment_ir_output({"ondemand_settlement_skipped": "amount_out_of_range"})
+			return
+
 		settings = self.get_settings(request_data)
 		description = getattr(self, "instant_settlement_description", None) or _(
 			"Instant settlement for captured Razorpay payment"
@@ -609,7 +628,8 @@ class RazorpaySettings(Document):
 		self.integration_request.db_set("output", get_json(output))
 
 	def _ondemand_settlement_already_triggered(self):
-		return bool(self._payment_ir_output().get("ondemand_settlement_ir"))
+		output = self._payment_ir_output()
+		return bool(output.get("ondemand_settlement_ir") or output.get("ondemand_settlement_skipped"))
 
 	def get_settings(self, data):
 		settings = frappe._dict(
@@ -1355,7 +1375,7 @@ def retry_pending_instant_settlements():
 		for ir in candidates:
 			try:
 				output = json.loads(ir.output or "{}")
-				if output.get("ondemand_settlement_ir"):
+				if output.get("ondemand_settlement_ir") or output.get("ondemand_settlement_skipped"):
 					continue
 				if cint(output.get("ondemand_settlement_attempts")) >= MAX_ONDEMAND_SETTLEMENT_ATTEMPTS:
 					continue
