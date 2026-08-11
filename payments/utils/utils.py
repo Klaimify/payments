@@ -11,6 +11,31 @@ def validate_integration_request(docname: str | None):
 		frappe.throw(_("Expired Token"))
 
 
+def request_relative_url(path: str = "") -> str:
+	"""Build an absolute URL against the current request's actual host when one is
+	available, falling back to frappe.utils.get_url() (which uses the site's
+	configured host_name) for contexts with no request.
+
+	Gateway callback URLs (e.g. CCAvenue's redirect_url/cancel_url) are built with
+	get_request_site_address()/get_url(), which always prefers site_config's
+	host_name over the host actually serving the request. When host_name is pinned
+	to one domain (e.g. because a background job elsewhere needs a guaranteed-public
+	URL), every gateway-initiated payment - even one started against a different
+	host, such as a local dev site - gets its callback pointed at that pinned
+	domain instead. The gateway then redirects back to a completely different
+	server than the one that encrypted the request, so verification/decryption
+	fails there. Preferring the request host keeps the callback on whichever host
+	actually initiated the payment."""
+	request = getattr(frappe.local, "request", None)
+	host_url = getattr(request, "host_url", None) if request else None
+	if host_url:
+		base = host_url.rstrip("/")
+		return f"{base}/{path.lstrip('/')}" if path else base
+	from frappe.utils import get_url
+
+	return get_url(path)
+
+
 def get_payment_gateway_controller(payment_gateway):
 	"""Return payment gateway controller"""
 	gateway = frappe.get_doc("Payment Gateway", payment_gateway)

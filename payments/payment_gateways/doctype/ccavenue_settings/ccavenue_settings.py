@@ -15,12 +15,12 @@ from frappe.utils import (
     cint,
     cstr,
     flt,
-    get_request_site_address,
     get_url,
 )
 from frappe.utils.password import get_decrypted_password
 
 from payments.utils import create_payment_gateway
+from payments.utils.utils import request_relative_url
 
 
 class CCAvenueSettings(Document):
@@ -107,9 +107,8 @@ def decrypt(cipher_hex: str, working_key: str) -> str:
 
 
 def get_ccavenue_params(payment_details, order_id, ccavenue_config):
-    callback_url = (
-        get_request_site_address(True)
-        + "/api/method/payments.payment_gateways.doctype.ccavenue_settings.ccavenue_settings.verify_transaction"
+    callback_url = request_relative_url(
+        "/api/method/payments.payment_gateways.doctype.ccavenue_settings.ccavenue_settings.verify_transaction"
     )
 
     ccavenue_params = {
@@ -120,6 +119,13 @@ def get_ccavenue_params(payment_details, order_id, ccavenue_config):
         "redirect_url": callback_url,
         "cancel_url": callback_url,
         "language": "EN",
+        "billing_name": payment_details.get("billing_name") or payment_details.get("payer_name"),
+        "billing_address": payment_details.get("billing_address"),
+        "billing_city": payment_details.get("billing_city"),
+        "billing_state": payment_details.get("billing_state"),
+        "billing_zip": payment_details.get("billing_zip"),
+        "billing_tel": payment_details.get("billing_tel"),
+        "billing_email": payment_details.get("billing_email") or payment_details.get("payer_email"),
     }
     ccavenue_params = {k: v for k, v in ccavenue_params.items() if v}
 
