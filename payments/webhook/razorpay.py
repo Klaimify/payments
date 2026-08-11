@@ -79,6 +79,14 @@ def handle_payment_webhook(data):
 				ref_doc.update_status(ref_data, "Failed")
 				update_payment_status(ref_doc, "Failed")
 
+		if status == "captured":
+			# Webhook is the most reliable capture signal (unlike the browser
+			# redirect flow, which can be interrupted before it runs). The
+			# controller de-dupes against the redirect/cron-triggered paths.
+			controller = frappe.get_doc("Razorpay Settings")
+			controller.integration_request = frappe.get_doc("Integration Request", ref_doc.name)
+			controller.process_instant_settlement_on_payment(payment, ref_data)
+
 
 def handle_refund_webhook(data):
 	"""Handle refund related webhook events"""

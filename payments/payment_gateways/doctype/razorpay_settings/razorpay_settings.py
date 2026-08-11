@@ -82,6 +82,16 @@ PENDING_ONDEMAND_IR_CACHE_KEY = "razorpay_ondemand_pending_integration_requests"
 PENDING_ONDEMAND_IR_CACHE_TTL = 7 * 24 * 60 * 60
 SETTLEMENT_ONDEMAND_URL = "https://api.razorpay.com/v1/settlements/ondemand"
 
+# Freshly captured funds aren't always in Razorpay's available balance yet, so
+# a settlement request can fail right after capture. retry_pending_instant_settlements
+# (cron, every 10 min) re-attempts until this cap is hit.
+MAX_ONDEMAND_SETTLEMENT_ATTEMPTS = 3
+
+# Razorpay's documented bounds for the on-demand settlement "amount" param, in paise
+# (₹100 to ₹500000000, despite the API error text saying "100").
+MIN_ONDEMAND_SETTLEMENT_AMOUNT = 10000
+MAX_ONDEMAND_SETTLEMENT_AMOUNT = 50000000000
+
 
 class RazorpaySettings(Document):
 	supported_currencies = (
@@ -467,8 +477,21 @@ class RazorpaySettings(Document):
 		return {"redirect_to": redirect_url, "status": status}
 
 	def process_instant_settlement_on_payment(self, payment_response, request_data):
-		"""Trigger Razorpay on-demand settlement for captured payments when enabled."""
+		"""Trigger Razorpay on-demand settlement for captured payments when enabled.
+
+		Safe to call more than once for the same payment (redirect flow, webhook,
+		and the capture cron can all reach this) and safe to retry after failure —
+		see _ondemand_settlement_already_triggered and retry_pending_instant_settlements.
+		"""
 		if not cint(getattr(self, "enable_instant_settlement", 0)):
+			return
+
+		if self._ondemand_settlement_already_triggered():
+			return
+
+		payment_ir = self.integration_request
+		attempts = cint((self._payment_ir_output() or {}).get("ondemand_settlement_attempts"))
+		if attempts >= MAX_ONDEMAND_SETTLEMENT_ATTEMPTS:
 			return
 
 		settle_full_balance = bool(cint(getattr(self, "settle_full_balance", 0)))
@@ -477,24 +500,37 @@ class RazorpaySettings(Document):
 			frappe.logger().warning("Skipping instant settlement: invalid captured amount")
 			return
 
+		# Razorpay rejects on-demand settlement requests outside this range; retrying
+		# won't help since the amount never changes, so give up permanently instead
+		# of letting the retry cron hammer the API every 10 min.
+		if not settle_full_balance and not (
+			MIN_ONDEMAND_SETTLEMENT_AMOUNT <= amount <= MAX_ONDEMAND_SETTLEMENT_AMOUNT
+		):
+			frappe.logger().warning(
+				f"Skipping instant settlement: amount {amount} outside Razorpay's allowed range "
+				f"({MIN_ONDEMAND_SETTLEMENT_AMOUNT}-{MAX_ONDEMAND_SETTLEMENT_AMOUNT} paise)"
+			)
+			if payment_ir:
+				self._update_payment_ir_output({"ondemand_settlement_skipped": "amount_out_of_range"})
+			return
+
 		settings = self.get_settings(request_data)
 		description = getattr(self, "instant_settlement_description", None) or _(
 			"Instant settlement for captured Razorpay payment"
 		)
 
 		ref_doctype = request_data.get("reference_doctype") or (
-			self.integration_request.reference_doctype if self.integration_request else ""
+			payment_ir.reference_doctype if payment_ir else ""
 		)
 		ref_docname = request_data.get("reference_docname") or (
-			self.integration_request.reference_docname if self.integration_request else ""
+			payment_ir.reference_docname if payment_ir else ""
 		)
-		payment_ir_name = self.integration_request.name if self.integration_request else ""
 
 		payload = {
 			"settle_full_balance": settle_full_balance,
 			"description": description,
 			"notes": {
-				"integration_request": payment_ir_name,
+				"integration_request": payment_ir.name if payment_ir else "",
 				"reference_doctype": ref_doctype,
 				"reference_docname": ref_docname,
 				"razorpay_payment_id": payment_response.get("id") or request_data.get("razorpay_payment_id") or "",
@@ -502,6 +538,9 @@ class RazorpaySettings(Document):
 		}
 		if not settle_full_balance:
 			payload["amount"] = amount
+
+		if payment_ir:
+			self._update_payment_ir_output({"ondemand_settlement_attempts": attempts + 1})
 
 		# Create a dedicated Integration Request for this settlement call so it can
 		# be tracked separately from the payment IR.
@@ -544,17 +583,10 @@ class RazorpaySettings(Document):
 				settlement_ir.db_set("output", get_json({"ondemand_settlement_trigger": trigger_data}))
 				_add_pending_ondemand_ir(settlement_ir.name)
 
-				# Write a back-reference on the payment IR for traceability.
-				if self.integration_request:
-					try:
-						existing_output = {}
-						if self.integration_request.output:
-							parsed = json.loads(self.integration_request.output)
-							existing_output = parsed if isinstance(parsed, dict) else {"response": parsed}
-						existing_output["ondemand_settlement_ir"] = settlement_ir.name
-						self.integration_request.db_set("output", get_json(existing_output))
-					except Exception:
-						frappe.log_error(frappe.get_traceback(), "Failed to update payment IR with settlement reference")
+				# Back-reference on the payment IR: this is also what
+				# _ondemand_settlement_already_triggered checks for.
+				if payment_ir:
+					self._update_payment_ir_output({"ondemand_settlement_ir": settlement_ir.name})
 
 				frappe.logger().info(
 					f"Instant settlement triggered: {response.get('id')} (settlement IR: {settlement_ir.name})"
@@ -572,10 +604,32 @@ class RazorpaySettings(Document):
 			settlement_ir.db_set(
 				"output", get_json({"error": frappe.get_traceback(), "api_response": error_body})
 			)
+			# Not marked as a hard failure here on purpose: this is usually the
+			# just-captured amount not yet reflected in Razorpay's available
+			# balance. retry_pending_instant_settlements re-attempts every 10 min
+			# up to MAX_ONDEMAND_SETTLEMENT_ATTEMPTS.
 			frappe.log_error(
 				f"{frappe.get_traceback()}\n\nAPI Response: {error_body}",
 				"Razorpay instant settlement error",
 			)
+
+	def _payment_ir_output(self):
+		if not self.integration_request or not self.integration_request.output:
+			return {}
+		try:
+			parsed = json.loads(self.integration_request.output)
+			return parsed if isinstance(parsed, dict) else {}
+		except Exception:
+			return {}
+
+	def _update_payment_ir_output(self, updates):
+		output = self._payment_ir_output()
+		output.update(updates)
+		self.integration_request.db_set("output", get_json(output))
+
+	def _ondemand_settlement_already_triggered(self):
+		output = self._payment_ir_output()
+		return bool(output.get("ondemand_settlement_ir") or output.get("ondemand_settlement_skipped"))
 
 	def get_settings(self, data):
 		settings = frappe._dict(
@@ -1291,3 +1345,47 @@ def _remove_pending_ondemand_ir(integration_request_name):
 	if integration_request_name in names:
 		names.remove(integration_request_name)
 		_set_pending_ondemand_ir_names(names)
+
+
+def retry_pending_instant_settlements():
+	"""Cron (every 10 min): re-attempt instant settlement triggers that failed on
+	a previous try — most commonly because the captured amount wasn't yet in
+	Razorpay's available balance. process_instant_settlement_on_payment itself
+	is idempotent and caps retries at MAX_ONDEMAND_SETTLEMENT_ATTEMPTS, so this
+	just needs to find candidate payment Integration Requests and call it again.
+	"""
+	try:
+		razorpay_settings = frappe.get_doc("Razorpay Settings")
+		if not cint(getattr(razorpay_settings, "enable_instant_settlement", 0)):
+			return
+
+		candidates = frappe.get_all(
+			"Integration Request",
+			filters={
+				"integration_request_service": "Razorpay",
+				"status": "Completed",
+				"url": ["!=", SETTLEMENT_ONDEMAND_URL],
+				"data": ["like", "%razorpay_payment_id%"],
+				"modified": [">=", add_to_date(now_datetime(), hours=-24)],
+			},
+			fields=["name", "data", "output"],
+			limit=200,
+		)
+
+		for ir in candidates:
+			try:
+				output = json.loads(ir.output or "{}")
+				if output.get("ondemand_settlement_ir") or output.get("ondemand_settlement_skipped"):
+					continue
+				if cint(output.get("ondemand_settlement_attempts")) >= MAX_ONDEMAND_SETTLEMENT_ATTEMPTS:
+					continue
+
+				data = json.loads(ir.data or "{}")
+				razorpay_settings.integration_request = frappe.get_doc("Integration Request", ir.name)
+				payment_response = {"id": data.get("razorpay_payment_id"), "amount": data.get("amount")}
+				razorpay_settings.process_instant_settlement_on_payment(payment_response, data)
+			except Exception:
+				frappe.log_error(frappe.get_traceback(), f"Failed retrying instant settlement for {ir.name}")
+
+	except Exception:
+		frappe.log_error(frappe.get_traceback(), "Instant settlement retry job failed")
