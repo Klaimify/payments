@@ -56,6 +56,7 @@ class CCAvenueSettings(Document):
             "gateway_url": ccavenue_config.url,
             "encRequest": ccavenue_params["encRequest"],
             "access_code": ccavenue_params["access_code"],
+            "order_id": integration_request.name,
         }
 
 
