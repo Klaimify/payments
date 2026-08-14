@@ -87,6 +87,13 @@ def get_ccavenue_config():
     return ccavenue_config
 
 
+# CCAvenue uses different success vocabularies across its APIs: the browser
+# redirect/webhook (encResp) response reports "Success", while the Order Status
+# Tracker API (used for manual verification) reports "Shipped" for a completed
+# transaction instead.
+CCAVENUE_SUCCESS_STATUSES = {"Success", "Shipped"}
+
+
 def _get_cipher(working_key: str):
     key = hashlib.md5(working_key.encode()).digest()
     iv = bytes(range(0, 16))
@@ -197,7 +204,7 @@ def finalize_request(order_id, transaction_response):
 
     request.db_set("output", frappe.as_json(transaction_response))
 
-    is_success = transaction_response.get("order_status") == "Success"
+    is_success = transaction_response.get("order_status") in CCAVENUE_SUCCESS_STATUSES
     status = "Failed"
 
     redirect_to = (
@@ -383,7 +390,7 @@ def process_webhook_payment(order_id, transaction_response):
 
     request.db_set("output", frappe.as_json(transaction_response))
 
-    is_success = transaction_response.get("order_status") == "Success"
+    is_success = transaction_response.get("order_status") in CCAVENUE_SUCCESS_STATUSES
     status = (
         "Completed"
         if is_success
