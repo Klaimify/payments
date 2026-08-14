@@ -3,7 +3,7 @@
 
 import hashlib
 from urllib.parse import parse_qsl, urlencode
-
+import requests
 import frappe
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad, unpad
@@ -120,13 +120,15 @@ def get_ccavenue_params(payment_details, order_id, ccavenue_config):
         "redirect_url": callback_url,
         "cancel_url": callback_url,
         "language": "EN",
-        "billing_name": payment_details.get("billing_name") or payment_details.get("payer_name"),
+        "billing_name": payment_details.get("billing_name")
+        or payment_details.get("payer_name"),
         "billing_address": payment_details.get("billing_address"),
         "billing_city": payment_details.get("billing_city"),
         "billing_state": payment_details.get("billing_state"),
         "billing_zip": payment_details.get("billing_zip"),
         "billing_tel": payment_details.get("billing_tel"),
-        "billing_email": payment_details.get("billing_email") or payment_details.get("payer_email"),
+        "billing_email": payment_details.get("billing_email")
+        or payment_details.get("payer_email"),
     }
     ccavenue_params = {k: v for k, v in ccavenue_params.items() if v}
 
@@ -250,3 +252,235 @@ def get_gateway_controller(doctype, docname):
     return frappe.db.get_value(
         "Payment Gateway", reference_doc.payment_gateway, "gateway_controller"
     )
+
+
+def log_webhook_response(
+    order_id=None,
+    status="Error",
+    http_status_code=None,
+    raw_payload=None,
+    decrypted_response=None,
+    error=None,
+):
+    """Persist every incoming CCAvenue webhook hit for auditing/debugging."""
+    integration_request = order_id if order_id and frappe.db.exists("Integration Request", order_id) else None
+
+    log = frappe.get_doc(
+        {
+            "doctype": "Webhook Response Log",
+            "gateway": "CCAvenue",
+            "order_id": order_id,
+            "status": status,
+            "http_status_code": http_status_code,
+            "integration_request": integration_request,
+            "raw_payload": frappe.as_json(raw_payload) if raw_payload else None,
+            "decrypted_response": frappe.as_json(decrypted_response) if decrypted_response else None,
+            "error": error,
+        }
+    )
+    log.insert(ignore_permissions=True)
+    frappe.db.commit()  # nosemgrep: frappe-semgrep-rules.rules.frappe-manual-commit
+
+
+@frappe.whitelist(allow_guest=True)
+def ccavenue_webhook():
+    """
+    Background Server-to-Server Webhook / Dynamic Event Notification endpoint.
+    CCAvenue sends a POST request with the 'encResp' argument.
+    """
+    # 1. Enforce that it is processing incoming server data
+    if frappe.request.method != "POST":
+        frappe.throw(_("Only POST requests are allowed"), frappe.PermissionError)
+
+    # 2. Fetch the configuration parameters
+    ccavenue_config = get_ccavenue_config()
+
+    # CCAvenue sends parameters as form-encoded data in a POST request
+    enc_response = frappe.local.form_dict.get("encResp")
+
+    if not enc_response:
+        frappe.log_error("Webhook payload missing 'encResp'", "CCAvenue Webhook Error")
+        # Return a status code so CCAvenue knows it reached the server but failed
+        frappe.local.response["http_status_code"] = 400
+        log_webhook_response(
+            status="Error",
+            http_status_code=400,
+            raw_payload=frappe.local.form_dict,
+            error="Missing encrypted payload",
+        )
+        return "Missing encrypted payload"
+
+    try:
+        # 3. Decrypt the response string and parse key-value pairs
+        decrypted_str = decrypt(enc_response, ccavenue_config.working_key)
+        plain_response = dict(parse_qsl(decrypted_str))
+    except Exception:
+        frappe.log_error(frappe.get_traceback(), "CCAvenue Webhook Decryption Failed")
+        frappe.local.response["http_status_code"] = 400
+        log_webhook_response(
+            status="Error",
+            http_status_code=400,
+            raw_payload=frappe.local.form_dict,
+            error=frappe.get_traceback(),
+        )
+        return "Decryption error"
+
+    order_id = plain_response.get("order_id")
+    if not order_id:
+        frappe.log_error(
+            f"Webhook payload missing order_id. Data: {cstr(plain_response)}",
+            "CCAvenue Webhook Error",
+        )
+        frappe.local.response["http_status_code"] = 400
+        log_webhook_response(
+            status="Error",
+            http_status_code=400,
+            decrypted_response=plain_response,
+            error="Missing order identifier",
+        )
+        return "Missing order identifier"
+
+    # 4. Process the background transaction state update
+    try:
+        process_webhook_payment(order_id, plain_response)
+    except Exception:
+        frappe.log_error(frappe.get_traceback(), "CCAvenue Webhook Processing Failed")
+        frappe.local.response["http_status_code"] = 500
+        log_webhook_response(
+            order_id=order_id,
+            status="Error",
+            http_status_code=500,
+            decrypted_response=plain_response,
+            error=frappe.get_traceback(),
+        )
+        return "Internal processing failed"
+
+    # 5. Tell CCAvenue the event was successfully acknowledged
+    frappe.local.response["http_status_code"] = 200
+    log_webhook_response(
+        order_id=order_id,
+        status="Success" if plain_response.get("order_status") == "Success" else "Failed",
+        http_status_code=200,
+        decrypted_response=plain_response,
+    )
+    return "OK"
+
+
+def process_webhook_payment(order_id, transaction_response):
+    """Updates database parameters silently without attempting UI user-redirection loops."""
+    if not frappe.db.exists("Integration Request", order_id):
+        frappe.log_error(
+            f"Integration Request {order_id} not found for webhook.",
+            "CCAvenue Webhook Error",
+        )
+        return
+
+    request = frappe.get_doc("Integration Request", order_id)
+
+    # Do not re-process if already marked Completed
+    if request.status == "Completed":
+        return
+
+    request.db_set("output", frappe.as_json(transaction_response))
+
+    is_success = transaction_response.get("order_status") == "Success"
+    status = (
+        "Completed"
+        if is_success
+        else (transaction_response.get("order_status") or "Failed")
+    )
+
+    if transaction_data := (
+        request.data and frappe.parse_json(request.data) or frappe._dict()
+    ):
+        if transaction_data.reference_doctype and transaction_data.reference_docname:
+            payment_status = "Completed" if is_success else status
+            try:
+                # Trigger hooks attached to standard document processing
+                frappe.get_doc(
+                    transaction_data.reference_doctype,
+                    transaction_data.reference_docname,
+                ).run_method("on_payment_authorized", payment_status)
+            except Exception:
+                frappe.log_error(
+                    frappe.get_traceback(), "Webhook Document Hook Exception"
+                )
+
+    request.db_set("status", "Completed" if is_success else "Failed")
+
+
+@frappe.whitelist()
+def check_payment_status_by_id(order_id: str) -> dict:
+    """
+    Queries CCAvenue Order Status Tracker API using an internal order_id.
+    Decrypts the response and returns the status mapping dictionary.
+    """
+    if not order_id:
+        frappe.throw(_("Please provide a valid Order ID"))
+
+    ccavenue_config = get_ccavenue_config()
+
+    # Determine correct endpoint based on Environment settings
+    if cint(ccavenue_config.sandbox):
+        api_url = "https://apitest.ccavenue.com/apis/servlet/DoWebTrans"
+    else:
+        api_url = "https://api.ccavenue.com/apis/servlet/DoWebTrans"
+
+    # 1. Structure the parameter payload for the API
+    query_params = {
+        "order_no": order_id,
+        "reference_no": "",  # Leave blank since we are using order_no/order_id
+    }
+
+    # 2. Convert to JSON text and encrypt
+    plain_text = frappe.as_json(query_params)
+    enc_request = encrypt(plain_text, ccavenue_config.working_key)
+
+    # 3. Setup standard POST body structural arguments required by CCAvenue
+    payload = {
+        "enc_request": enc_request,
+        "access_code": ccavenue_config.access_code,
+        "command": "orderStatusTracker",
+        "request_type": "JSON",
+        "response_type": "JSON",
+        "version": "1.2",
+    }
+
+    try:
+        # 4. Perform synchronous server-to-server request
+        headers = {"Content-Type": "application/x-www-form-urlencoded"}
+        response = requests.post(api_url, data=payload, headers=headers, timeout=20)
+
+        if response.status_code != 200:
+            frappe.throw(_("Failed to connect to CCAvenue verification servers."))
+
+        # 5. Extract status from standard plain string formats returned
+        response_text = response.text.strip()
+        response_dict = dict(parse_qsl(response_text))
+
+        # The top-level "status" flag only reflects whether CCAvenue could look up
+        # the order at all (0/1); it is unrelated to the transaction's own outcome.
+        # Orders that timed out, were aborted, etc. still come back with status=0
+        # but include a valid enc_response carrying the real order_status - so the
+        # only thing that determines whether we have usable data is enc_response.
+        if "enc_response" in response_dict:
+            decrypted_str = decrypt(
+                response_dict["enc_response"].strip(), ccavenue_config.working_key
+            )
+            final_status_data = frappe.parse_json(decrypted_str)
+            return final_status_data
+        else:
+            frappe.log_error(
+                f"CCAvenue status tracking raw failure: {response_text}",
+                "CCAvenue API Error",
+            )
+            return {
+                "status": "Error",
+                "message": "No encrypted response returned by CCAvenue",
+            }
+
+    except Exception:
+        frappe.log_error(
+            frappe.get_traceback(), "CCAvenue Status Query Exception Failed"
+        )
+        return {"status": "Error", "message": "Failed to connect or decrypt payload"}
