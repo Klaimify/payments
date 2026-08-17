@@ -89,15 +89,7 @@ def get_ccavenue_config():
     return ccavenue_config
 
 
-# CCAvenue uses different success vocabularies across its APIs: the browser
-# redirect/webhook (encResp) response reports "Success", while the Order Status
-# Tracker API (used for manual verification) reports "Shipped" for a completed
-# transaction instead.
-CCAVENUE_SUCCESS_STATUSES = {"Success", "Shipped"}
-
-# Order Status Tracker API statuses that mean CCAvenue itself hasn't reached a
-# final outcome yet, so the request should be left as-is and re-checked later.
-CCAVENUE_PENDING_TRACKER_STATUSES = {"Awaited", "Initiated"}
+CCAVENUE_SUCCESS_STATUSES = {"Success", "Successful", "Shipped"}
 
 
 def _get_cipher(working_key: str):
@@ -301,11 +293,12 @@ def log_webhook_response(
     frappe.db.commit()  # nosemgrep: frappe-semgrep-rules.rules.frappe-manual-commit
 
 
-@frappe.whitelist(allow_guest=True)
-def ccavenue_webhook():
+def _handle_ccavenue_den_notification(error_log_context):
     """
-    Background Server-to-Server Webhook / Dynamic Event Notification endpoint.
-    CCAvenue sends a POST request with the 'encResp' argument.
+    Shared handler for CCAvenue Dynamic Event Notification (DEN) endpoints.
+    Every DEN event type (Order Status, Order Reconciliation Status, ...) is
+    registered as its own URL in the CCAvenue merchant panel, but they all POST
+    the same encrypted 'encResp' envelope identified by 'order_id'.
     """
     # 1. Enforce that it is processing incoming server data
     if frappe.request.method != "POST":
@@ -318,7 +311,9 @@ def ccavenue_webhook():
     enc_response = frappe.local.form_dict.get("encResp")
 
     if not enc_response:
-        frappe.log_error("Webhook payload missing 'encResp'", "CCAvenue Webhook Error")
+        frappe.log_error(
+            f"{error_log_context} payload missing 'encResp'", "CCAvenue Webhook Error"
+        )
         # Return a status code so CCAvenue knows it reached the server but failed
         frappe.local.response["http_status_code"] = 400
         log_webhook_response(
@@ -334,7 +329,9 @@ def ccavenue_webhook():
         decrypted_str = decrypt(enc_response, ccavenue_config.working_key)
         plain_response = dict(parse_qsl(decrypted_str))
     except Exception:
-        frappe.log_error(frappe.get_traceback(), "CCAvenue Webhook Decryption Failed")
+        frappe.log_error(
+            frappe.get_traceback(), f"{error_log_context} Decryption Failed"
+        )
         frappe.local.response["http_status_code"] = 400
         log_webhook_response(
             status="Error",
@@ -347,7 +344,7 @@ def ccavenue_webhook():
     order_id = plain_response.get("order_id")
     if not order_id:
         frappe.log_error(
-            f"Webhook payload missing order_id. Data: {cstr(plain_response)}",
+            f"{error_log_context} payload missing order_id. Data: {cstr(plain_response)}",
             "CCAvenue Webhook Error",
         )
         frappe.local.response["http_status_code"] = 400
@@ -363,7 +360,9 @@ def ccavenue_webhook():
     try:
         process_webhook_payment(order_id, plain_response)
     except Exception:
-        frappe.log_error(frappe.get_traceback(), "CCAvenue Webhook Processing Failed")
+        frappe.log_error(
+            frappe.get_traceback(), f"{error_log_context} Processing Failed"
+        )
         frappe.local.response["http_status_code"] = 500
         log_webhook_response(
             order_id=order_id,
@@ -379,12 +378,25 @@ def ccavenue_webhook():
     log_webhook_response(
         order_id=order_id,
         status=(
-            "Success" if plain_response.get("order_status") == "Success" else "Failed"
+            "Success"
+            if plain_response.get("order_status") in CCAVENUE_SUCCESS_STATUSES
+            else "Failed"
         ),
         http_status_code=200,
         decrypted_response=plain_response,
     )
     return "OK"
+
+
+@frappe.whitelist(allow_guest=True)
+def ccavenue_webhook():
+    return _handle_ccavenue_den_notification("CCAvenue Webhook")
+
+
+@frappe.whitelist(allow_guest=True)
+def ccavenue_reconciliation_webhook():
+
+    return _handle_ccavenue_den_notification("CCAvenue Reconciliation Webhook")
 
 
 def process_webhook_payment(order_id, transaction_response):
@@ -502,23 +514,10 @@ def check_payment_status_by_id(order_id: str) -> dict:
         return {"status": "Error", "message": "Failed to connect or decrypt payload"}
 
 
-# CCAvenue's hosted page lets a customer retry after a decline without a new
-# order_id: several transaction attempts can end up under one order_no.
-# orderStatusTracker queried with a blank reference_no has been observed to
-# return an EARLIER attempt instead of the latest one for such orders, so a
-# single failure-looking read is not trustworthy. Re-check this many cron
-# cycles (15 min apart) before accepting a failure as final; a clear success
-# is still finalized immediately.
 CCAVENUE_MAX_VERIFICATION_ATTEMPTS = 6
 
 
 def verify_pending_payments():
-    """Cron (every 15 min): reconcile CCAvenue Integration Requests that never
-    received a redirect/webhook callback (e.g. the customer closed the tab
-    after paying) by polling the Order Status Tracker API via
-    check_payment_status_by_id, then finalizing the request the same way the
-    webhook handler does.
-    """
     pending_order_ids = frappe.get_all(
         "Integration Request",
         filters={
@@ -553,8 +552,9 @@ def verify_pending_payments():
                 )
             continue
 
-        if not order_status or order_status in CCAVENUE_PENDING_TRACKER_STATUSES:
-            # Still not final on CCAvenue's side, re-check on the next run.
+        if not order_status:
+            # Couldn't read a status at all (connectivity/decrypt issue on our
+            # end) - re-check on the next run without spending an attempt.
             continue
 
         try:
