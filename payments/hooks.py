@@ -120,6 +120,9 @@ scheduler_events = {
 			"payments.payment_gateways.doctype.razorpay_settings.razorpay_settings.poll_ondemand_settlement_statuses",
 			"payments.payment_gateways.doctype.razorpay_settings.razorpay_settings.retry_pending_instant_settlements",
 		],
+		"*/15 * * * *": [
+			"payments.payment_gateways.doctype.ccavenue_settings.ccavenue_settings.verify_pending_payments",
+		],
 		"0 22 * * *": [
 			"payments.payment_gateways.doctype.razorpay_settings.razorpay_settings.check_missed_settlement_webhooks"
 		]

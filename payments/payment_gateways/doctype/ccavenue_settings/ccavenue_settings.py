@@ -11,11 +11,13 @@ from frappe import _
 from frappe.integrations.utils import create_request_log
 from frappe.model.document import Document
 from frappe.utils import (
+    add_to_date,
     call_hook_method,
     cint,
     cstr,
     flt,
     get_url,
+    now_datetime,
 )
 from frappe.utils.password import get_decrypted_password
 
@@ -92,6 +94,10 @@ def get_ccavenue_config():
 # Tracker API (used for manual verification) reports "Shipped" for a completed
 # transaction instead.
 CCAVENUE_SUCCESS_STATUSES = {"Success", "Shipped"}
+
+# Order Status Tracker API statuses that mean CCAvenue itself hasn't reached a
+# final outcome yet, so the request should be left as-is and re-checked later.
+CCAVENUE_PENDING_TRACKER_STATUSES = {"Awaited", "Initiated"}
 
 
 def _get_cipher(working_key: str):
@@ -270,7 +276,11 @@ def log_webhook_response(
     error=None,
 ):
     """Persist every incoming CCAvenue webhook hit for auditing/debugging."""
-    integration_request = order_id if order_id and frappe.db.exists("Integration Request", order_id) else None
+    integration_request = (
+        order_id
+        if order_id and frappe.db.exists("Integration Request", order_id)
+        else None
+    )
 
     log = frappe.get_doc(
         {
@@ -281,7 +291,9 @@ def log_webhook_response(
             "http_status_code": http_status_code,
             "integration_request": integration_request,
             "raw_payload": frappe.as_json(raw_payload) if raw_payload else None,
-            "decrypted_response": frappe.as_json(decrypted_response) if decrypted_response else None,
+            "decrypted_response": (
+                frappe.as_json(decrypted_response) if decrypted_response else None
+            ),
             "error": error,
         }
     )
@@ -366,7 +378,9 @@ def ccavenue_webhook():
     frappe.local.response["http_status_code"] = 200
     log_webhook_response(
         order_id=order_id,
-        status="Success" if plain_response.get("order_status") == "Success" else "Failed",
+        status=(
+            "Success" if plain_response.get("order_status") == "Success" else "Failed"
+        ),
         http_status_code=200,
         decrypted_response=plain_response,
     )
@@ -465,11 +479,6 @@ def check_payment_status_by_id(order_id: str) -> dict:
         response_text = response.text.strip()
         response_dict = dict(parse_qsl(response_text))
 
-        # The top-level "status" flag only reflects whether CCAvenue could look up
-        # the order at all (0/1); it is unrelated to the transaction's own outcome.
-        # Orders that timed out, were aborted, etc. still come back with status=0
-        # but include a valid enc_response carrying the real order_status - so the
-        # only thing that determines whether we have usable data is enc_response.
         if "enc_response" in response_dict:
             decrypted_str = decrypt(
                 response_dict["enc_response"].strip(), ccavenue_config.working_key
@@ -491,3 +500,94 @@ def check_payment_status_by_id(order_id: str) -> dict:
             frappe.get_traceback(), "CCAvenue Status Query Exception Failed"
         )
         return {"status": "Error", "message": "Failed to connect or decrypt payload"}
+
+
+# CCAvenue's hosted page lets a customer retry after a decline without a new
+# order_id: several transaction attempts can end up under one order_no.
+# orderStatusTracker queried with a blank reference_no has been observed to
+# return an EARLIER attempt instead of the latest one for such orders, so a
+# single failure-looking read is not trustworthy. Re-check this many cron
+# cycles (15 min apart) before accepting a failure as final; a clear success
+# is still finalized immediately.
+CCAVENUE_MAX_VERIFICATION_ATTEMPTS = 6
+
+
+def verify_pending_payments():
+    """Cron (every 15 min): reconcile CCAvenue Integration Requests that never
+    received a redirect/webhook callback (e.g. the customer closed the tab
+    after paying) by polling the Order Status Tracker API via
+    check_payment_status_by_id, then finalizing the request the same way the
+    webhook handler does.
+    """
+    pending_order_ids = frappe.get_all(
+        "Integration Request",
+        filters={
+            "integration_request_service": "CCAvenue",
+            "status": ["in", ("Queued", "Authorized")],
+            "creation": ["<", add_to_date(now_datetime(), minutes=-10)],
+            "modified": [">=", add_to_date(now_datetime(), days=-3)],
+        },
+        pluck="name",
+        limit=200,
+    )
+
+    for order_id in pending_order_ids:
+        try:
+            status_response = check_payment_status_by_id(order_id)
+        except Exception:
+            frappe.log_error(
+                frappe.get_traceback(),
+                f"CCAvenue Payment Verification Failed for {order_id}",
+            )
+            continue
+
+        order_status = status_response.get("order_status") if status_response else None
+
+        if order_status in CCAVENUE_SUCCESS_STATUSES:
+            try:
+                process_webhook_payment(order_id, status_response)
+            except Exception:
+                frappe.log_error(
+                    frappe.get_traceback(),
+                    f"CCAvenue Payment Verification Finalize Failed for {order_id}",
+                )
+            continue
+
+        if not order_status or order_status in CCAVENUE_PENDING_TRACKER_STATUSES:
+            # Still not final on CCAvenue's side, re-check on the next run.
+            continue
+
+        try:
+            previous_output = (
+                frappe.parse_json(
+                    frappe.db.get_value("Integration Request", order_id, "output")
+                    or "{}"
+                )
+                or {}
+            )
+        except Exception:
+            previous_output = {}
+
+        attempts = cint(previous_output.get("_verification_attempts")) + 1
+
+        if attempts < CCAVENUE_MAX_VERIFICATION_ATTEMPTS:
+            # Looks failed, but it may be a stale read of an earlier attempt
+            # under this order_id - hold off and check again next cycle
+            # instead of locking in "Failed" right away.
+            status_response["_verification_attempts"] = attempts
+            frappe.db.set_value(
+                "Integration Request",
+                order_id,
+                "output",
+                frappe.as_json(status_response),
+                update_modified=True,
+            )
+            continue
+
+        try:
+            process_webhook_payment(order_id, status_response)
+        except Exception:
+            frappe.log_error(
+                frappe.get_traceback(),
+                f"CCAvenue Payment Verification Finalize Failed for {order_id}",
+            )
