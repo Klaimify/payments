@@ -1,0 +1,86 @@
+{
+ "actions": [],
+ "allow_bulk_edit": 1,
+ "allow_rename": 1,
+ "creation": "2026-08-17 14:45:14.686941",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "merchant_id",
+  "merchant_key",
+  "staging",
+  "column_break_jugq",
+  "channel_id",
+  "timeout_configuration",
+  "terminals__pos_devices__section",
+  "table_qsom"
+ ],
+ "fields": [
+  {
+   "fieldname": "merchant_id",
+   "fieldtype": "Data",
+   "label": "Merchant ID"
+  },
+  {
+   "fieldname": "merchant_key",
+   "fieldtype": "Password",
+   "label": "Merchant Key"
+  },
+  {
+   "default": "0",
+   "fieldname": "staging",
+   "fieldtype": "Check",
+   "label": "Staging"
+  },
+  {
+   "fieldname": "column_break_jugq",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "channel_id",
+   "fieldtype": "Data",
+   "label": "Channel ID"
+  },
+  {
+   "fieldname": "timeout_configuration",
+   "fieldtype": "Int",
+   "label": "Timeout Configuration"
+  },
+  {
+   "fieldname": "terminals__pos_devices__section",
+   "fieldtype": "Section Break",
+   "label": "Terminals ( POS Devices )"
+  },
+  {
+   "fieldname": "table_qsom",
+   "fieldtype": "Table",
+   "options": "POS Devices"
+  }
+ ],
+ "grid_page_length": 50,
+ "index_web_pages_for_search": 1,
+ "issingle": 1,
+ "links": [],
+ "modified": "2026-08-17 14:48:10.088694",
+ "modified_by": "Administrator",
+ "module": "Payment Gateways",
+ "name": "PayTM POS Settings",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "print": 1,
+   "read": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  }
+ ],
+ "row_format": "Dynamic",
+ "rows_threshold_for_grid_search": 20,
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": []
+}
