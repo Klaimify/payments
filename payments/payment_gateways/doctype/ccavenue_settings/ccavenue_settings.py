@@ -580,6 +580,31 @@ def get_order_lookup_attempts(order_id: str) -> list[dict]:
         return []
 
 
+def _pick_latest_successful_attempt(attempts):
+    """Out of a check_payment_status_by_id attempts list, return the successful
+    one - the most recently dated if more than one attempt against the same
+    order_id succeeded (e.g. a declined retry followed by a real payment).
+    """
+    successful = [a for a in attempts if a.get("order_status") in CCAVENUE_SUCCESS_STATUSES]
+    if not successful:
+        return None
+    if len(successful) == 1:
+        return successful[0]
+
+    def attempt_datetime(attempt):
+        for key in ("order_status_date_time", "trans_date"):
+            value = attempt.get(key)
+            if not value:
+                continue
+            try:
+                return get_datetime(value)
+            except Exception:
+                continue
+        return get_datetime("1970-01-01")
+
+    return max(successful, key=attempt_datetime)
+
+
 @frappe.whitelist()
 def check_payment_status_by_id(order_id: str) -> dict:
     if not order_id:
@@ -645,6 +670,32 @@ def check_payment_status_by_id(order_id: str) -> dict:
                     "message": "Unexpected response shape from CCAvenue",
                 }
             final_status_data["attempts"] = attempts
+
+            if final_status_data.get("order_status") not in CCAVENUE_SUCCESS_STATUSES:
+                # orderStatusTracker with a blank reference_no reflects
+                # whichever attempt CCAvenue considers "latest", which is not
+                # necessarily the one that actually succeeded - a declined
+                # retry can outrank an earlier successful payment. Trust a
+                # confirmed successful attempt (from webhook logs or
+                # orderLookup) over that read.
+                successful_attempt = _pick_latest_successful_attempt(attempts)
+                if successful_attempt:
+                    final_status_data["order_status"] = successful_attempt.get(
+                        "order_status"
+                    )
+                    final_status_data["order_bank_ref_no"] = successful_attempt.get(
+                        "bank_ref_no"
+                    ) or final_status_data.get("order_bank_ref_no")
+                    final_status_data["tracking_id"] = successful_attempt.get(
+                        "tracking_id"
+                    ) or final_status_data.get("tracking_id")
+                    final_status_data["reference_no"] = final_status_data["tracking_id"]
+                    final_status_data["order_status_date_time"] = (
+                        successful_attempt.get("order_status_date_time")
+                        or successful_attempt.get("trans_date")
+                        or final_status_data.get("order_status_date_time")
+                    )
+
             return final_status_data
         else:
             frappe.log_error(
