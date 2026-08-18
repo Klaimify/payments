@@ -2,6 +2,7 @@
 # License: MIT. See LICENSE
 
 import hashlib
+from datetime import timedelta
 from urllib.parse import parse_qsl, urlencode
 import requests
 import frappe
@@ -16,6 +17,7 @@ from frappe.utils import (
     cint,
     cstr,
     flt,
+    get_datetime,
     get_url,
     now_datetime,
 )
@@ -166,6 +168,11 @@ def verify_transaction(**kwargs):
         )
     except Exception:
         frappe.log_error(frappe.get_traceback(), "CCAvenue Payment Failed")
+        log_webhook_response(
+            status="Error",
+            raw_payload=kwargs,
+            error=frappe.get_traceback(),
+        )
         frappe.respond_as_web_page(
             _("Payment Failed"),
             _("Unable to verify the payment response."),
@@ -180,6 +187,11 @@ def verify_transaction(**kwargs):
             f"Order unsuccessful. Response: {cstr(plain_response)}",
             "CCAvenue Payment Failed",
         )
+        log_webhook_response(
+            status="Error",
+            decrypted_response=plain_response,
+            error="Missing order identifier",
+        )
         frappe.respond_as_web_page(
             _("Payment Failed"),
             _(
@@ -189,6 +201,16 @@ def verify_transaction(**kwargs):
             indicator_color="red",
         )
         return
+
+    log_webhook_response(
+        order_id=order_id,
+        status=(
+            "Success"
+            if plain_response.get("order_status") in CCAVENUE_SUCCESS_STATUSES
+            else "Failed"
+        ),
+        decrypted_response=plain_response,
+    )
 
     finalize_request(order_id, plain_response)
 
@@ -442,14 +464,135 @@ def process_webhook_payment(order_id, transaction_response):
     request.db_set("status", "Completed" if is_success else "Failed")
 
 
+def get_logged_payment_attempts(order_id: str) -> list[dict]:
+    logs = frappe.get_all(
+        "Webhook Response Log",
+        filters={"order_id": order_id},
+        fields=["name", "status", "decrypted_response", "creation"],
+        order_by="creation asc",
+        ignore_permissions=True,
+    )
+
+    attempts = {}
+    for log in logs:
+        try:
+            data = (
+                frappe.parse_json(log.decrypted_response)
+                if log.decrypted_response
+                else {}
+            )
+        except Exception:
+            data = {}
+        if not isinstance(data, dict):
+            continue
+        attempt_key = data.get("tracking_id") or data.get("reference_no") or log.name
+        # Keep the most recent log entry seen for a given attempt (tracking_id).
+        attempts[attempt_key] = {
+            "tracking_id": data.get("tracking_id") or data.get("reference_no"),
+            "order_status": data.get("order_status"),
+            "amount": data.get("amount") or data.get("order_amt"),
+            "bank_ref_no": data.get("bank_ref_no") or data.get("order_bank_ref_no"),
+            "payment_mode": data.get("payment_mode"),
+            "failure_message": data.get("failure_message"),
+            "trans_date": data.get("trans_date") or data.get("order_date_time"),
+            "webhook_log": log.name,
+            "logged_status": log.status,
+        }
+
+    return list(attempts.values())
+
+
+def get_order_lookup_attempts(order_id: str) -> list[dict]:
+    ccavenue_config = get_ccavenue_config()
+
+    if cint(ccavenue_config.sandbox):
+        api_url = "https://apitest.ccavenue.com/apis/servlet/DoWebTrans"
+    else:
+        api_url = "https://api.ccavenue.com/apis/servlet/DoWebTrans"
+
+    creation = get_datetime(
+        frappe.db.get_value("Integration Request", order_id, "creation")
+        or now_datetime()
+    )
+    from_date = (creation - timedelta(days=1)).strftime("%d-%m-%Y")
+    to_date = (now_datetime() + timedelta(days=1)).strftime("%d-%m-%Y")
+
+    query_params = {
+        "order_no": order_id,
+        "from_date": from_date,
+        "to_date": to_date,
+        "page_number": 1,
+    }
+    plain_text = frappe.as_json(query_params)
+    enc_request = encrypt(plain_text, ccavenue_config.working_key)
+
+    payload = {
+        "enc_request": enc_request,
+        "access_code": ccavenue_config.access_code,
+        "command": "orderLookup",
+        "request_type": "JSON",
+        "response_type": "JSON",
+        "version": "1.2",
+    }
+
+    try:
+        headers = {"Content-Type": "application/x-www-form-urlencoded"}
+        response = requests.post(api_url, data=payload, headers=headers, timeout=20)
+        if response.status_code != 200:
+            return []
+
+        response_dict = dict(parse_qsl(response.text.strip()))
+        if "enc_response" not in response_dict:
+            return []
+
+        decrypted_str = decrypt(
+            response_dict["enc_response"].strip(), ccavenue_config.working_key
+        )
+        data = frappe.parse_json(decrypted_str)
+        if not isinstance(data, dict):
+            return []
+
+        orders = data.get("order_Status_List") or []
+        if isinstance(orders, dict):
+            orders = [orders]
+        if not isinstance(orders, list):
+            return []
+
+        attempts = []
+        for order in orders:
+            if not isinstance(order, dict):
+                continue
+            attempts.append(
+                {
+                    "tracking_id": order.get("reference_no"),
+                    "order_status": order.get("order_status"),
+                    "amount": order.get("order_amt"),
+                    "bank_ref_no": order.get("order_bank_ref_no"),
+                    "payment_mode": order.get("order_option_type"),
+                    "trans_date": order.get("order_date_time"),
+                    "order_status_date_time": order.get("order_status_date_time"),
+                    "source": "ccavenue_order_lookup",
+                }
+            )
+        return attempts
+    except Exception:
+        frappe.log_error(frappe.get_traceback(), "CCAvenue Order Lookup Failed")
+        return []
+
+
 @frappe.whitelist()
 def check_payment_status_by_id(order_id: str) -> dict:
-    """
-    Queries CCAvenue Order Status Tracker API using an internal order_id.
-    Decrypts the response and returns the status mapping dictionary.
-    """
     if not order_id:
         frappe.throw(_("Please provide a valid Order ID"))
+
+    attempts_by_key = {
+        (a.get("tracking_id") or a.get("webhook_log")): a
+        for a in get_logged_payment_attempts(order_id)
+    }
+    for attempt in get_order_lookup_attempts(order_id):
+        key = attempt.get("tracking_id") or len(attempts_by_key)
+        attempts_by_key[key] = attempt
+    attempts = list(attempts_by_key.values())
 
     ccavenue_config = get_ccavenue_config()
 
@@ -462,7 +605,7 @@ def check_payment_status_by_id(order_id: str) -> dict:
     # 1. Structure the parameter payload for the API
     query_params = {
         "order_no": order_id,
-        "reference_no": "",  # Leave blank since we are using order_no/order_id
+        "reference_no": "",
     }
 
     # 2. Convert to JSON text and encrypt
@@ -496,6 +639,12 @@ def check_payment_status_by_id(order_id: str) -> dict:
                 response_dict["enc_response"].strip(), ccavenue_config.working_key
             )
             final_status_data = frappe.parse_json(decrypted_str)
+            if not isinstance(final_status_data, dict):
+                final_status_data = {
+                    "status": "Error",
+                    "message": "Unexpected response shape from CCAvenue",
+                }
+            final_status_data["attempts"] = attempts
             return final_status_data
         else:
             frappe.log_error(
@@ -505,13 +654,18 @@ def check_payment_status_by_id(order_id: str) -> dict:
             return {
                 "status": "Error",
                 "message": "No encrypted response returned by CCAvenue",
+                "attempts": attempts,
             }
 
     except Exception:
         frappe.log_error(
             frappe.get_traceback(), "CCAvenue Status Query Exception Failed"
         )
-        return {"status": "Error", "message": "Failed to connect or decrypt payload"}
+        return {
+            "status": "Error",
+            "message": "Failed to connect or decrypt payload",
+            "attempts": attempts,
+        }
 
 
 CCAVENUE_MAX_VERIFICATION_ATTEMPTS = 6
@@ -553,8 +707,6 @@ def verify_pending_payments():
             continue
 
         if not order_status:
-            # Couldn't read a status at all (connectivity/decrypt issue on our
-            # end) - re-check on the next run without spending an attempt.
             continue
 
         try:
@@ -571,9 +723,6 @@ def verify_pending_payments():
         attempts = cint(previous_output.get("_verification_attempts")) + 1
 
         if attempts < CCAVENUE_MAX_VERIFICATION_ATTEMPTS:
-            # Looks failed, but it may be a stale read of an earlier attempt
-            # under this order_id - hold off and check again next cycle
-            # instead of locking in "Failed" right away.
             status_response["_verification_attempts"] = attempts
             frappe.db.set_value(
                 "Integration Request",
