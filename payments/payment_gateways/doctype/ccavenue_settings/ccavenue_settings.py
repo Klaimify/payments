@@ -243,10 +243,19 @@ def finalize_request(order_id, transaction_response):
             else (transaction_response.get("order_status") or "Failed")
         )
         try:
-            custom_redirect_to = frappe.get_doc(
+            reference_doc = frappe.get_doc(
                 transaction_data.reference_doctype,
                 transaction_data.reference_docname,
-            ).run_method("on_payment_authorized", payment_status)
+            )
+            # An order_id can be a retry of an earlier failed attempt under the
+            # same booking (multiple Integration Requests/Event Payments per
+            # booking). Hooks on on_payment_authorized have no other way to
+            # know which specific attempt this call is about, so flag it -
+            # see frappe_koradi_temple's record_online_payment_status.
+            reference_doc.flags.payment_gateway_order_id = order_id
+            custom_redirect_to = reference_doc.run_method(
+                "on_payment_authorized", payment_status
+            )
             if is_success:
                 status = "Completed"
             if custom_redirect_to:
@@ -417,7 +426,6 @@ def ccavenue_webhook():
 
 @frappe.whitelist(allow_guest=True)
 def ccavenue_reconciliation_webhook():
-
     return _handle_ccavenue_den_notification("CCAvenue Reconciliation Webhook")
 
 
@@ -451,11 +459,19 @@ def process_webhook_payment(order_id, transaction_response):
         if transaction_data.reference_doctype and transaction_data.reference_docname:
             payment_status = "Completed" if is_success else status
             try:
-                # Trigger hooks attached to standard document processing
-                frappe.get_doc(
+                reference_doc = frappe.get_doc(
                     transaction_data.reference_doctype,
                     transaction_data.reference_docname,
-                ).run_method("on_payment_authorized", payment_status)
+                )
+                # An order_id can be a retry of an earlier failed attempt
+                # under the same booking (multiple Integration
+                # Requests/Event Payments per booking). Hooks on
+                # on_payment_authorized have no other way to know which
+                # specific attempt this call is about, so flag it - see
+                # frappe_koradi_temple's record_online_payment_status.
+                reference_doc.flags.payment_gateway_order_id = order_id
+                # Trigger hooks attached to standard document processing
+                reference_doc.run_method("on_payment_authorized", payment_status)
             except Exception:
                 frappe.log_error(
                     frappe.get_traceback(), "Webhook Document Hook Exception"
@@ -585,7 +601,9 @@ def _pick_latest_successful_attempt(attempts):
     one - the most recently dated if more than one attempt against the same
     order_id succeeded (e.g. a declined retry followed by a real payment).
     """
-    successful = [a for a in attempts if a.get("order_status") in CCAVENUE_SUCCESS_STATUSES]
+    successful = [
+        a for a in attempts if a.get("order_status") in CCAVENUE_SUCCESS_STATUSES
+    ]
     if not successful:
         return None
     if len(successful) == 1:
