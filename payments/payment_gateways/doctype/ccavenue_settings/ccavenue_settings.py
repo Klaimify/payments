@@ -84,6 +84,13 @@ def get_ccavenue_config():
 
 CCAVENUE_SUCCESS_STATUSES = {"Success", "Successful", "Shipped"}
 
+# CCAvenue's own "not decided yet" states - the transaction hasn't reached a
+# final outcome, so these must never be finalized as Failed (that would
+# wrongly notify the attendee of a rejection, and can prompt them to retry
+# while the original attempt is still legitimately in flight). Everything
+# else that isn't a success status is a genuine terminal failure.
+CCAVENUE_PENDING_STATUSES = {"Awaited", "Initiated"}
+
 
 def _get_cipher(working_key: str):
 	key = hashlib.md5(working_key.encode()).digest()
@@ -205,17 +212,27 @@ def finalize_request(order_id, transaction_response):
 
 	request.db_set("output", frappe.as_json(transaction_response))
 
-	is_success = transaction_response.get("order_status") in CCAVENUE_SUCCESS_STATUSES
+	order_status = transaction_response.get("order_status")
+	is_success = order_status in CCAVENUE_SUCCESS_STATUSES
+	is_pending = order_status in CCAVENUE_PENDING_STATUSES
 	status = "Failed"
 
 	redirect_to = (
 		transaction_data.get("redirect_to")
-		if is_success
+		if is_success or is_pending
 		else (transaction_data.get("failed_redirect_to") or transaction_data.get("redirect_to"))
 	) or None
 
-	if transaction_data.reference_doctype and transaction_data.reference_docname:
-		payment_status = "Completed" if is_success else (transaction_response.get("order_status") or "Failed")
+	if is_pending:
+		# CCAvenue hasn't reached a final outcome yet (Awaited/Initiated) -
+		# leave the Integration Request as-is (still Queued/Authorized) so the
+		# reconciliation cron keeps checking it, and don't call
+		# on_payment_authorized at all: there's nothing to notify the
+		# booking/attendee about yet, and doing so would wrongly mark this
+		# attempt Failed while it may still complete.
+		status = request.status or "Queued"
+	elif transaction_data.reference_doctype and transaction_data.reference_docname:
+		payment_status = "Completed" if is_success else (order_status or "Failed")
 		try:
 			reference_doc = frappe.get_doc(
 				transaction_data.reference_doctype,
@@ -396,8 +413,17 @@ def process_webhook_payment(order_id, transaction_response):
 
 	request.db_set("output", frappe.as_json(transaction_response))
 
-	is_success = transaction_response.get("order_status") in CCAVENUE_SUCCESS_STATUSES
-	status = "Completed" if is_success else (transaction_response.get("order_status") or "Failed")
+	order_status = transaction_response.get("order_status")
+	is_success = order_status in CCAVENUE_SUCCESS_STATUSES
+
+	if order_status in CCAVENUE_PENDING_STATUSES:
+		# CCAvenue hasn't reached a final outcome yet (Awaited/Initiated) -
+		# leave status as-is (still Queued/Authorized) so the reconciliation
+		# cron keeps checking it, and don't notify the booking/attendee of a
+		# (premature) rejection.
+		return
+
+	status = "Completed" if is_success else (order_status or "Failed")
 
 	if transaction_data := (request.data and frappe.parse_json(request.data) or frappe._dict()):
 		if transaction_data.reference_doctype and transaction_data.reference_docname:
@@ -407,12 +433,6 @@ def process_webhook_payment(order_id, transaction_response):
 					transaction_data.reference_doctype,
 					transaction_data.reference_docname,
 				)
-				# An order_id can be a retry of an earlier failed attempt
-				# under the same booking (multiple Integration
-				# Requests/Event Payments per booking). Hooks on
-				# on_payment_authorized have no other way to know which
-				# specific attempt this call is about, so flag it - see
-				# frappe_koradi_temple's record_online_payment_status.
 				reference_doc.flags.payment_gateway_order_id = order_id
 				# Trigger hooks attached to standard document processing
 				reference_doc.run_method("on_payment_authorized", payment_status)
@@ -512,6 +532,9 @@ def get_order_lookup_attempts(order_id: str) -> list[dict]:
 		attempts = []
 		for order in orders:
 			if not isinstance(order, dict):
+				continue
+			entry_order_no = order.get("order_no") or order.get("order_id")
+			if entry_order_no and entry_order_no != order_id:
 				continue
 			attempts.append(
 				{
@@ -620,12 +643,6 @@ def check_payment_status_by_id(order_id: str) -> dict:
 			final_status_data["attempts"] = attempts
 
 			if final_status_data.get("order_status") not in CCAVENUE_SUCCESS_STATUSES:
-				# orderStatusTracker with a blank reference_no reflects
-				# whichever attempt CCAvenue considers "latest", which is not
-				# necessarily the one that actually succeeded - a declined
-				# retry can outrank an earlier successful payment. Trust a
-				# confirmed successful attempt (from webhook logs or
-				# orderLookup) over that read.
 				successful_attempt = _pick_latest_successful_attempt(attempts)
 				if successful_attempt:
 					final_status_data["order_status"] = successful_attempt.get("order_status")
@@ -717,7 +734,10 @@ def verify_pending_payments():
 				)
 			continue
 
-		if not order_status:
+		if not order_status or order_status in CCAVENUE_PENDING_STATUSES:
+			# Awaited/Initiated - CCAvenue itself hasn't decided yet, so this
+			# doesn't count against the verification-attempts budget below;
+			# just re-check on the next cron run.
 			continue
 
 		try:
