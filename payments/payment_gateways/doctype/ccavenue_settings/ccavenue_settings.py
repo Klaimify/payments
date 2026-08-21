@@ -741,7 +741,10 @@ CCAVENUE_MAX_VERIFICATION_ATTEMPTS = 6
 
 
 def verify_pending_payments():
-    pending_order_ids = frappe.get_all(
+    frappe.error_log(
+        "CCAvenue verify_pending_payments started", "CCAvenue Payment Verification"
+    )
+    pending_requests = frappe.get_all(
         "Integration Request",
         filters={
             "integration_request_service": "CCAvenue",
@@ -749,11 +752,26 @@ def verify_pending_payments():
             "creation": ["<", add_to_date(now_datetime(), minutes=-10)],
             "modified": [">=", add_to_date(now_datetime(), days=-3)],
         },
-        pluck="name",
+        fields=["name", "reference_doctype", "reference_docname"],
         limit=200,
     )
 
-    for order_id in pending_order_ids:
+    for request in pending_requests:
+        order_id = request.name
+
+        if request.reference_doctype and request.reference_docname:
+            already_settled = frappe.db.exists(
+                "Integration Request",
+                {
+                    "reference_doctype": request.reference_doctype,
+                    "reference_docname": request.reference_docname,
+                    "status": "Completed",
+                    "name": ["!=", order_id],
+                },
+            )
+            if already_settled:
+                continue
+
         try:
             status_response = check_payment_status_by_id(order_id)
         except Exception:
