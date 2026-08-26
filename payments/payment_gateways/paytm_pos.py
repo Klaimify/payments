@@ -22,10 +22,8 @@ _logger = frappe.logger("paytm_pos", allow_site=True, max_size=5, file_count=10)
 
 
 def generate(body: dict, key: str) -> str:
-	"""Generate Paytm checksum. Must pass body as dict, NOT json.dumps().
-
+	"""Generate Paytm checksum.
 	Paytm's lib sorts keys, joins values with '|', hashes, then AES encrypts.
-	json.dumps() produces 0330 (Invalid checksum); dict input produces ACCEPTED_SUCCESS.
 	"""
 	return generateSignature(body, key)
 
@@ -64,9 +62,7 @@ def _build_head(config: dict, body: dict) -> dict:
 
 
 def _call(endpoint: str, head: dict, body: dict) -> dict:
-	"""POST JSON to Paytm. Raises ValidationError on network failure.
-
- Attaches the request payload as ``_request`` key so callers can log it.
+	""" Attaches the request payload as ``_request`` key so callers can log it.
 	"""
 	payload = {"head": head, "body": body}
 	try:
