@@ -6,12 +6,22 @@
  "doctype": "DocType",
  "engine": "InnoDB",
  "field_order": [
+  "paytm_configuration_section",
   "merchant_id",
   "merchant_key",
   "staging",
   "column_break_jugq",
   "channel_id",
   "timeout_configuration",
+  "services_section",
+  "sevice_column",
+  "sale_api",
+  "status_enquiry_api",
+  "void_api",
+  "column_break_iuqv",
+  "refund_api",
+  "column_break_yjrt",
+  "refund_status_api",
   "terminals__pos_devices__section",
   "table_qsom"
  ],
@@ -19,12 +29,16 @@
   {
    "fieldname": "merchant_id",
    "fieldtype": "Data",
-   "label": "Merchant ID"
+   "in_list_view": 1,
+   "label": "Merchant ID",
+   "reqd": 1
   },
   {
    "fieldname": "merchant_key",
    "fieldtype": "Password",
-   "label": "Merchant Key"
+   "in_list_view": 1,
+   "label": "Merchant Key",
+   "reqd": 1
   },
   {
    "default": "0",
@@ -37,9 +51,13 @@
    "fieldtype": "Column Break"
   },
   {
+   "default": "EDC",
+   "description": "Default - EDC (Electronic Data Capture)",
    "fieldname": "channel_id",
    "fieldtype": "Data",
-   "label": "Channel ID"
+   "in_list_view": 1,
+   "label": "Channel ID",
+   "reqd": 1
   },
   {
    "fieldname": "timeout_configuration",
@@ -55,13 +73,76 @@
    "fieldname": "table_qsom",
    "fieldtype": "Table",
    "options": "POS Devices"
+  },
+  {
+   "fieldname": "paytm_configuration_section",
+   "fieldtype": "Section Break",
+   "label": "PayTM Configuration"
+  },
+  {
+   "fieldname": "sevice_column",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "1",
+   "description": "Used to process the sale transaction.",
+   "documentation_url": "https://www.paytmpayments.com/docs/api/pos-sale-api?ref=poswirelessintegrationapireference",
+   "fieldname": "sale_api",
+   "fieldtype": "Check",
+   "label": "Sale API",
+   "show_description_on_click": 1
+  },
+  {
+   "default": "1",
+   "description": "Used to get the status of the transaction (sale and void transactions)",
+   "documentation_url": "https://www.paytmpayments.com/docs/api/pos-status-enquiry-api?ref=poswirelessintegrationapireference",
+   "fieldname": "status_enquiry_api",
+   "fieldtype": "Check",
+   "label": "Status Enquiry API"
+  },
+  {
+   "default": "1",
+   "description": "Used to cancel the successful sale transaction on the same day the transaction was done.",
+   "documentation_url": "https://www.paytmpayments.com/docs/api/pos-void-api?ref=poswirelessintegrationapireference",
+   "fieldname": "void_api",
+   "fieldtype": "Check",
+   "label": "Void API"
+  },
+  {
+   "default": "0",
+   "description": "1.) To initiate partial or complete refund of transaction\n\n\n2.) This is an async process. In the sync response we only notify registration of refund with PG.\n\n[   \nNOTE :- This does not mean refund has been accepted by PG or processed to customer\u2019s bank account ]",
+   "documentation_url": "https://www.paytmpayments.com/docs/api/refund-api?ref=poswirelessintegrationapireference",
+   "fieldname": "refund_api",
+   "fieldtype": "Check",
+   "label": "Refund API"
+  },
+  {
+   "default": "0",
+   "description": "To fetch the details of refund transaction. The details provided are as follows:\n\n1.) Status of refund, \n2.) Destination where refund has been initiated\n, 3.) Refund reference number with which customer can inquire the refund status with his bank",
+   "documentation_url": "https://www.paytmpayments.com/docs/api/refund-status-api?ref=poswirelessintegrationapireference",
+   "fieldname": "refund_status_api",
+   "fieldtype": "Check",
+   "label": "Refund Status API"
+  },
+  {
+   "fieldname": "services_section",
+   "fieldtype": "Section Break",
+   "label": "Services"
+  },
+  {
+   "fieldname": "column_break_iuqv",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "column_break_yjrt",
+   "fieldtype": "Column Break"
   }
  ],
  "grid_page_length": 50,
  "index_web_pages_for_search": 1,
  "issingle": 1,
  "links": [],
- "modified": "2026-08-17 14:48:10.088694",
+ "modified": "2026-08-26 11:07:51.952142",
  "modified_by": "Administrator",
  "module": "Payment Gateways",
  "name": "PayTM POS Settings",
