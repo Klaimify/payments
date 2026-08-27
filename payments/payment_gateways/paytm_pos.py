@@ -44,7 +44,8 @@ def _generate_merchant_txn_id(booking_name: str) -> str:
 	"""Unique alphanumeric merchantTransactionId (8-32 chars, no special chars)."""
 	alnum = re.sub(r"[^A-Za-z0-9]", "", booking_name)
 	ts = datetime.now().strftime("%y%m%d%H%M%S")
-	return f"JYOT{alnum}{ts}"[-32:]
+	txn_id = f"{alnum}{ts}"
+	return txn_id[-32:] if len(txn_id) > 32 else txn_id
 
 
 def _checksum_body(body: dict) -> dict:
@@ -62,8 +63,7 @@ def _build_head(config: dict, body: dict) -> dict:
 
 
 def _call(endpoint: str, head: dict, body: dict) -> dict:
-	""" Attaches the request payload as ``_request`` key so callers can log it.
-	"""
+	"""Attaches the request payload as ``_request`` key so callers can log it."""
 	payload = {"head": head, "body": body}
 	try:
 		response = requests.post(
