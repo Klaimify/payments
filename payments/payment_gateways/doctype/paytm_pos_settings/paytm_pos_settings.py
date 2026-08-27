@@ -1,8 +1,4 @@
-import json
-from datetime import datetime
-
 import frappe
-import requests
 from frappe import _
 from frappe.model.document import Document
 from frappe.utils import cint
@@ -41,59 +37,6 @@ class PayTMPOSSettings(Document):
 			if row.enabled and row.terminal_id in seen_terminal_ids:
 				frappe.throw(_("Terminal ID {0} is duplicated in POS Devices").format(row.terminal_id))
 			seen_terminal_ids.add(row.terminal_id)
-
-		# Validate credentials against Paytm server
-		self._validate_credentials()
-
-	def _validate_credentials(self):
-		"""Send a lightweight status enquiry to Paytm to verify MID + Key + Channel."""
-		from payments.payment_gateways.paytm_pos import generate, _checksum_body
-
-		host = STAGING_HOST if cint(self.staging) else PRODUCTION_HOST
-		endpoint = host + STATUS_PATH
-
-		body = {
-			"paytmMid": (self.merchant_id or "").strip(),
-			"paytmTid": "00000000",
-			"transactionDateTime": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-			"merchantTransactionId": f"VALIDATE_{int(datetime.now().timestamp())}",
-		}
-		head = {
-			"requestTimeStamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-			"channelId": (self.channel_id or "").strip(),
-			"checksum": generate(_checksum_body(body), (self.merchant_key or "").strip()),
-			"version": "1.0",
-		}
-
-		try:
-			resp = requests.post(
-				endpoint,
-				data=json.dumps({"head": head, "body": body}),
-				headers={"Content-Type": "application/json"},
-				timeout=15,
-			)
-			resp.raise_for_status()
-			result = resp.json()
-			info = (result.get("body") or {}).get("resultInfo") or {}
-			status = (info.get("resultStatus") or "").upper()
-			code = (info.get("resultCode") or "").strip()
-			msg = info.get("resultMsg") or ""
-
-			# Valid credentials: signature accepted, order not found is expected
-			if status in ("S", "A", "SUCCESS") or code in ("0000", "0009"):
-				return
-			if code in ("0330", "0233", "0007", "0011", "0090", "0180") or "order" in msg.lower():
-				return
-
-			# Invalid credentials
-			frappe.throw(
-				_("Invalid POS credentials: {0}").format(msg or f"Status: {status}, Code: {code}")
-			)
-
-		except requests.RequestException as exc:
-			frappe.throw(
-				_("Could not verify credentials — connection failed: {0}").format(exc)
-			)
 
 
 def get_paytm_pos_config() -> dict:
