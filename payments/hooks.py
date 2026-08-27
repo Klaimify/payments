@@ -112,6 +112,7 @@ extend_doctype_class = {"Web Form": "payments.overrides.payment_webform.PaymentW
 # ---------------
 
 scheduler_events = {
+<<<<<<< HEAD
     "all": [
         "payments.payment_gateways.doctype.razorpay_settings.razorpay_settings.capture_payment",
     ],
@@ -127,6 +128,20 @@ scheduler_events = {
             "payments.payment_gateways.doctype.razorpay_settings.razorpay_settings.check_missed_settlement_webhooks"
         ],
     },
+=======
+	"all": [
+		"payments.payment_gateways.doctype.razorpay_settings.razorpay_settings.capture_payment",
+	],
+	"cron": {
+		"*/10 * * * *": [
+			"payments.payment_gateways.doctype.razorpay_settings.razorpay_settings.poll_ondemand_settlement_statuses",
+			"payments.payment_gateways.doctype.razorpay_settings.razorpay_settings.retry_pending_instant_settlements",
+		],
+		"0 22 * * *": [
+			"payments.payment_gateways.doctype.razorpay_settings.razorpay_settings.check_missed_settlement_webhooks"
+		],
+	},
+>>>>>>> f932a04 (Fix: Linters - Run Pre-Commit)
 }
 
 # Testing

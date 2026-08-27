@@ -44,11 +44,7 @@ def get_paytm_pos_config() -> dict:
 	the host/endpoints resolved from the staging flag."""
 	config = frappe.db.get_singles_dict("PayTM POS Settings")
 	config.update(
-		{
-			"merchant_key": get_decrypted_password(
-				"PayTM POS Settings", "PayTM POS Settings", "merchant_key"
-			)
-		}
+		{"merchant_key": get_decrypted_password("PayTM POS Settings", "PayTM POS Settings", "merchant_key")}
 	)
 
 	host = STAGING_HOST if cint(config.get("staging")) else PRODUCTION_HOST
@@ -69,11 +65,7 @@ def get_paytm_pos_config() -> dict:
 def get_enabled_terminals() -> list[dict]:
 	"""Return the enabled POS Devices rows as a list of dicts."""
 	settings = frappe.get_single("PayTM POS Settings")
-	return [
-		row.as_dict()
-		for row in settings.table_qsom
-		if row.enabled
-	]
+	return [row.as_dict() for row in settings.table_qsom if row.enabled]
 
 
 def get_terminal(terminal_name: str | None = None) -> dict:
