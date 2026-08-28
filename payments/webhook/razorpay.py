@@ -71,7 +71,11 @@ def handle_payment_webhook(data):
 			output["payment_id"] = payment.get("id")
 			ref_doc.db_set("output", get_json(output))
 		
-		if ref_doc.status == "Queued":
+		# Multiple payment attempts can hit the same order (first attempt fails,
+		# a later retry succeeds). Only gate on "already Completed" so a Queued
+		# -> Failed -> Completed sequence for the same order still updates the
+		# reference doc on the successful retry.
+		if ref_doc.status != "Completed":
 			if status == "captured":
 				ref_doc.update_status(ref_data, "Completed")
 				update_payment_status(ref_doc, "Completed")
