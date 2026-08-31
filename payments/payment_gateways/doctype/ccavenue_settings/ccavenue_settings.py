@@ -684,7 +684,6 @@ CCAVENUE_MAX_VERIFICATION_ATTEMPTS = 6
 
 
 def verify_pending_payments():
-	frappe.log_error("CCAvenue verify_pending_payments cron started", "CCAvenue Cron")
 	pending_requests = frappe.get_all(
 		"Integration Request",
 		filters={
