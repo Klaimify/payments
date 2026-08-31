@@ -659,6 +659,93 @@ class RazorpaySettings(Document):
 			auth=(settings.api_key, settings.api_secret),
 		)
 
+	def fetch_order_payments(self, order_id, request_data=None):
+		"""Fetch all payment attempts for an order.
+
+		Lets a caller find a captured payment even when it wasn't the first
+		attempt on the order (retries) - see e_mandi's
+		check_payment_status_with_razorpay for the reconciliation use case.
+		"""
+		request_data = request_data or {}
+		settings = self.get_settings(request_data)
+		resp = make_get_request(
+			f"https://api.razorpay.com/v1/orders/{order_id}/payments",
+			auth=(settings.api_key, settings.api_secret),
+		)
+		return resp.get("items") or []
+
+	def reconcile_order_payments(self, order_id):
+		"""Sync an order's Integration Request (and its reference doc, via the
+		on_payment_authorized hook) against the latest Razorpay payment attempt
+		for that order - not just whichever attempt last touched it.
+
+		Handles retried payments: an order can have several attempts (fail,
+		fail, succeed) where only the last one matters. Idempotent - a no-op
+		once the Integration Request is already Completed, so it's safe to
+		call from a webhook, a cron, or a user-facing "check status" button.
+		Reusable by any reference doctype that implements on_payment_authorized,
+		not just E Mandi Transaction.
+		"""
+		import json
+
+		from frappe.integrations.utils import get_json
+
+		attempts = self.fetch_order_payments(order_id)
+		result = {
+			"found": False,
+			"reconciled": False,
+			"attempts": len(attempts),
+			"razorpay_payment_id": None,
+			"razorpay_status": None,
+			"integration_request": None,
+		}
+		if not attempts:
+			return result
+
+		captured = [p for p in attempts if p.get("status") == "captured"]
+		latest = captured[0] if captured else max(attempts, key=lambda p: p.get("created_at") or 0)
+		result["razorpay_payment_id"] = latest.get("id")
+		result["razorpay_status"] = latest.get("status")
+
+		ir = frappe.db.get_value(
+			"Integration Request",
+			{
+				"integration_request_service": "Razorpay",
+				"data": ["like", f'%"order_id": "{order_id}"%'],
+			},
+			["name", "status", "data", "output", "reference_doctype", "reference_docname"],
+			as_dict=True,
+		)
+		if not ir:
+			return result
+
+		result["found"] = True
+		result["integration_request"] = ir.name
+		result["integration_request_status"] = ir.status
+
+		if latest.get("status") != "captured" or ir.status == "Completed":
+			return result
+
+		ref_data = json.loads(ir.data or "{}")
+		ir_doc = frappe.get_doc("Integration Request", ir.name)
+		ir_doc.update_status(ref_data, "Completed")
+
+		output = json.loads(ir_doc.output) if ir_doc.output else {}
+		output["payment_id"] = latest.get("id")
+		ir_doc.db_set("output", get_json(output))
+
+		if ir_doc.reference_doctype and ir_doc.reference_docname:
+			ref_doc = frappe.get_doc(ir_doc.reference_doctype, ir_doc.reference_docname)
+			if hasattr(ref_doc, "on_payment_authorized"):
+				ref_doc.run_method("on_payment_authorized", "Completed")
+
+		self.integration_request = frappe.get_doc("Integration Request", ir.name)
+		self.process_instant_settlement_on_payment(latest, ref_data)
+
+		result["integration_request_status"] = "Completed"
+		result["reconciled"] = True
+		return result
+
 	def cancel_subscription(self, subscription_id):
 		settings = self.get_settings({})
 
