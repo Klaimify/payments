@@ -73,7 +73,7 @@ def _generate_checksum(body: dict, key: str) -> str:
 def verify_checksum(body: dict, key: str, checksum: str) -> bool:
 	"""Verify Paytm checksum. Official lib raises on corrupt checksums.
 
-	Reserved for an inbound EDC callback endpoint — not used by the poll flow.
+	Reserved for an inbound EDC callback endpoint — not used by flow.
 	"""
 	try:
 		return verifySignature(body, key, checksum)
@@ -101,7 +101,7 @@ def _generate_merchant_txn_id(reference_docname: str) -> str:
 
 
 def _checksum_body(body: dict) -> dict:
-	"""Flat dict for checksum — skip nested dicts/lists, stringify the rest.
+	"""dict for checksum.
 
 	Paytm's lib lower-cases every value.
 	"""
@@ -153,7 +153,7 @@ def _result(response: dict) -> dict:
 
 
 def _normalize_sale_body(response: dict) -> dict:
-	"""Gateway-neutral summary of a successful Sale/Status response body."""
+	"""Gateway summary of a successful Sale/Status response body."""
 	body = response.get("body") or {}
 	return {
 		"payment_method": body.get("payMethod"),
