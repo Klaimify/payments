@@ -89,8 +89,7 @@
    "documentation_url": "https://www.paytmpayments.com/docs/api/pos-sale-api?ref=poswirelessintegrationapireference",
    "fieldname": "sale_api",
    "fieldtype": "Check",
-   "label": "Sale API",
-   "show_description_on_click": 1
+   "label": "Sale API"
   },
   {
    "default": "1",
@@ -142,7 +141,7 @@
  "index_web_pages_for_search": 1,
  "issingle": 1,
  "links": [],
- "modified": "2026-09-01 10:39:36.692373",
+ "modified": "2026-09-01 11:27:36.708528",
  "modified_by": "Administrator",
  "module": "Payment Gateways",
  "name": "PayTM POS Settings",
