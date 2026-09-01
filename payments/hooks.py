@@ -116,6 +116,9 @@ scheduler_events = {
 		"payments.payment_gateways.doctype.razorpay_settings.razorpay_settings.capture_payment",
 	],
 	"cron": {
+		"*/1 * * * *": [
+			"payments.payment_gateways.doctype.paytm_pos_settings.paytm_pos_settings.poll_pending_pos_sales",
+		],
 		"*/10 * * * *": [
 			"payments.payment_gateways.doctype.razorpay_settings.razorpay_settings.poll_ondemand_settlement_statuses",
 			"payments.payment_gateways.doctype.razorpay_settings.razorpay_settings.retry_pending_instant_settlements",
