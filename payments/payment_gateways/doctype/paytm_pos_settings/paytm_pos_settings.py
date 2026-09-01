@@ -533,7 +533,10 @@ class PayTMPOSSettings(Document):
 			raise
 
 		data["request"] = response.get("_request")
-		status = result_status(response)
+		# context="status" so that ACCEPTED (A) is treated as pending — the
+		# customer has not yet swiped/inserted their card.  Only S/SUCCESS is
+		# a settled payment.
+		status = result_status(response, context="status")
 		ir_status = {"success": "Authorized", "pending": "Queued"}.get(status, "Failed")
 		self._mark_ir(ir.name, ir_status, output=response, data=data)
 
