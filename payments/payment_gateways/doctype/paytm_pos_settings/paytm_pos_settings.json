@@ -23,7 +23,7 @@
   "column_break_yjrt",
   "refund_status_api",
   "terminals__pos_devices__section",
-  "table_qsom"
+  "pos_devices"
  ],
  "fields": [
   {
@@ -70,7 +70,7 @@
    "label": "Terminals ( POS Devices )"
   },
   {
-   "fieldname": "table_qsom",
+   "fieldname": "pos_devices",
    "fieldtype": "Table",
    "options": "POS Devices"
   },
@@ -142,7 +142,7 @@
  "index_web_pages_for_search": 1,
  "issingle": 1,
  "links": [],
- "modified": "2026-08-26 11:07:51.952142",
+ "modified": "2026-09-01 10:39:36.692373",
  "modified_by": "Administrator",
  "module": "Payment Gateways",
  "name": "PayTM POS Settings",
