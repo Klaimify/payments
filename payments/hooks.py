@@ -112,21 +112,24 @@ extend_doctype_class = {"Web Form": "payments.overrides.payment_webform.PaymentW
 # ---------------
 
 scheduler_events = {
-    "all": [
-        "payments.payment_gateways.doctype.razorpay_settings.razorpay_settings.capture_payment",
-    ],
-    "cron": {
-        "*/10 * * * *": [
-            "payments.payment_gateways.doctype.razorpay_settings.razorpay_settings.poll_ondemand_settlement_statuses",
-            "payments.payment_gateways.doctype.razorpay_settings.razorpay_settings.retry_pending_instant_settlements",
-        ],
-        "*/4 * * * *": [
-            "payments.payment_gateways.doctype.ccavenue_settings.ccavenue_settings.verify_pending_payments",
-        ],
-        "0 22 * * *": [
-            "payments.payment_gateways.doctype.razorpay_settings.razorpay_settings.check_missed_settlement_webhooks"
-        ],
-    },
+	"all": [
+		"payments.payment_gateways.doctype.razorpay_settings.razorpay_settings.capture_payment",
+	],
+	"cron": {
+		"*/1 * * * *": [
+			"payments.payment_gateways.doctype.paytm_pos_settings.paytm_pos_settings.poll_pending_pos_sales",
+		],
+		"*/10 * * * *": [
+			"payments.payment_gateways.doctype.razorpay_settings.razorpay_settings.poll_ondemand_settlement_statuses",
+			"payments.payment_gateways.doctype.razorpay_settings.razorpay_settings.retry_pending_instant_settlements",
+		],
+		"*/4 * * * *": [
+			"payments.payment_gateways.doctype.ccavenue_settings.ccavenue_settings.verify_pending_payments",
+		],
+		"0 22 * * *": [
+			"payments.payment_gateways.doctype.razorpay_settings.razorpay_settings.check_missed_settlement_webhooks"
+		],
+	},
 }
 
 # Testing
@@ -138,7 +141,7 @@ before_tests = "erpnext.setup.utils.before_tests"  # To setup company and accoun
 # ------------------------------
 #
 override_whitelisted_methods = {
-    "frappe.website.doctype.web_form.web_form.accept": "payments.overrides.payment_webform.accept"
+	"frappe.website.doctype.web_form.web_form.accept": "payments.overrides.payment_webform.accept"
 }
 #
 # each overriding function accepts a `data` argument;
