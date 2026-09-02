@@ -4,10 +4,16 @@
 import re
 import unittest
 
-from payments.payment_gateways.doctype.paytm_pos_settings.paytm_pos_settings import (
-	_checksum_body,
-	_generate_merchant_txn_id,
-	_normalize_sale_body,
+from payments.payment_gateways.doctype.paytm_pos_settings.paytm_pos_utils import (
+	checksum_body as _checksum_body,
+)
+from payments.payment_gateways.doctype.paytm_pos_settings.paytm_pos_utils import (
+	generate_merchant_txn_id as _generate_merchant_txn_id,
+)
+from payments.payment_gateways.doctype.paytm_pos_settings.paytm_pos_utils import (
+	normalize_sale_body as _normalize_sale_body,
+)
+from payments.payment_gateways.doctype.paytm_pos_settings.paytm_pos_utils import (
 	refund_result_status,
 	result_status,
 )
