@@ -32,6 +32,7 @@ IR_SERVICE_REFUND = "PayTM POS Refund"
 
 IR_DESCRIPTION_SALE = "POS Payment (Paytm EDC)"
 IR_DESCRIPTION_REFUND = "POS Refund (Paytm EDC)"
+IR_DESCRIPTION_VOID = "POS Payment VOID"
 
 # Sale Registers as Failed after SALE_GRACE_MINUTES,
 # After Acceptings Request on device
