@@ -26,6 +26,7 @@ from frappe.utils import cint, flt, get_datetime, getdate, now_datetime, nowdate
 from payments.payment_gateways.doctype.paytm_pos_settings.paytm_pos_utils import (
 	IR_DESCRIPTION_REFUND,
 	IR_DESCRIPTION_SALE,
+	IR_DESCRIPTION_VOID,
 	IR_SERVICE,
 	IR_SERVICE_REFUND,
 	SALE_EXPIRY_MINUTES,
@@ -231,33 +232,67 @@ class PayTMPOSSettings(Document):
 		return status
 
 	def void_sale(self, order_id: str) -> str:
-		"""Void a same-day successful sale. Returns the void status word."""
+		"""Void a same-day successful sale. Returns the void status word.
+
+		Creates a dedicated Integration Request (service ``PayTM POS``,
+		description ``POS Payment VOID``) so the void call is logged
+		separately from the original sale."""
 		self._require_api("void_api")
 
 		if load_pos_ir(order_id).status == "Cancelled":
 			frappe.throw(_("This sale has already been voided"))
 
 		status = self.poll_sale(order_id)
-		if status != "success":
-			frappe.throw(_("Cannot void: transaction status is {0}, expected success").format(status))
+		if status not in ("success", "pending"):
+			frappe.throw(
+				_("Cannot void: transaction status is {0}, expected success or pending").format(status)
+			)
 
-		ir = load_pos_ir(order_id)
-		data = frappe.parse_json(ir.data) if ir.data else {}
-		txn_data = data.get("result") or {}
+		sale_ir = load_pos_ir(order_id)
+		sale_data = frappe.parse_json(sale_ir.data) if sale_ir.data else {}
+		txn_data = sale_data.get("result") or {}
 		txn_datetime = txn_data.get("transaction_datetime") or ""
 		if txn_datetime and getdate(txn_datetime[:10]) != getdate(nowdate()):
 			frappe.throw(_("Cannot void: transaction is not from today"))
 
-		response = _void_transaction(data.get("merchantTransactionId"), data.get("terminal_id"))
-		void_status = result_status(response)
-		data["request"] = response.get("_request")
-		data["void_result"] = result(response)
+		merchant_txn_id = sale_data.get("merchantTransactionId")
+		terminal_id = sale_data.get("terminal_id")
 
-		if void_status == "success":
-			self._mark_ir(ir.name, "Cancelled", output=response, data=data)
-			self._run_failure_bridge(ir, _("Payment voided at terminal"))
-		else:
-			self._mark_ir(ir.name, ir.status, output=response, data=data)
+		# Create a dedicated Integration Request for the void call
+		void_data = {
+			"sale_order_id": order_id,
+			"merchantTransactionId": merchant_txn_id,
+			"terminal_id": terminal_id,
+			"payment_gateway": IR_SERVICE,
+			"request": None,
+		}
+		void_ir = frappe.get_doc(
+			{
+				"doctype": "Integration Request",
+				"is_remote_request": 1,
+				"integration_request_service": IR_SERVICE,
+				"request_description": IR_DESCRIPTION_VOID,
+				"status": "Queued",
+				"reference_doctype": sale_ir.reference_doctype,
+				"reference_docname": sale_ir.reference_docname,
+				"data": frappe.as_json(void_data),
+			}
+		)
+		void_ir.insert(ignore_permissions=True)
+		frappe.db.commit()  # nosemgrep — POS void: persist void IR before API call
+
+		try:
+			response = _void_transaction(merchant_txn_id, terminal_id)
+		except Exception:
+			self._mark_ir(void_ir.name, "Failed", output={"error": frappe.get_traceback()})
+			raise
+
+		void_status = result_status(response)
+		void_data["request"] = response.get("_request")
+		void_data["void_result"] = result(response)
+
+		ir_status = {"success": "Completed"}.get(void_status, "Failed")
+		self._mark_ir(void_ir.name, ir_status, output=response, data=void_data)
 
 		return void_status
 
