@@ -25,10 +25,14 @@ from frappe.utils import cint, flt, get_datetime, getdate, now_datetime, nowdate
 
 from payments.payment_gateways.doctype.paytm_pos_settings.paytm_pos_utils import (
 	IR_DESCRIPTION_REFUND,
+	IR_DESCRIPTION_REFUND_STATUS,
 	IR_DESCRIPTION_SALE,
+	IR_DESCRIPTION_STATUS,
 	IR_DESCRIPTION_VOID,
 	IR_SERVICE,
 	IR_SERVICE_REFUND,
+	IR_SERVICE_REFUND_STATUS,
+	IR_SERVICE_STATUS,
 	SALE_EXPIRY_MINUTES,
 	SALE_GRACE_MINUTES,
 	_logger,
@@ -195,10 +199,11 @@ class PayTMPOSSettings(Document):
 		return {"order_id": ir.name, "merchant_txn_id": merchant_txn_id, "status": status}
 
 	def poll_sale(self, order_id: str) -> str:
-		"""Query the gateway, advance the IR, run the success/failure bridge.
+		"""Query the gateway via Status Enquiry API, advance the IR, run success/failure bridge.
 
-		Returns the normalised status string (``success``/``failed``/``expired``
-		/``pending``).  Idempotent once the IR is in a terminal state.
+		Maintains a single dedicated Status Enquiry Integration Request per sale,
+		updating it in-place across subsequent poll attempts with incremented poll numbers
+		(e.g., 'POS Status Enquiry #1', 'POS Status Enquiry #2').
 		"""
 		ir = load_pos_ir(order_id)
 		if ir.status in ("Completed", "Cancelled", "Failed"):
@@ -210,9 +215,65 @@ class PayTMPOSSettings(Document):
 		if not merchant_txn_id:
 			frappe.throw(_("Integration Request {0} has no merchantTransactionId").format(order_id))
 
-		response = _status_enquiry(merchant_txn_id, terminal_id)
+		# Find existing Status Enquiry IR or create the first one for this sale attempt
+		existing_status_ir_name = frappe.db.get_value(
+			"Integration Request",
+			{
+				"reference_doctype": ir.reference_doctype,
+				"reference_docname": ir.reference_docname,
+				"integration_request_service": IR_SERVICE_STATUS,
+			},
+			"name",
+			order_by="creation desc",
+		)
+
+		if existing_status_ir_name:
+			status_ir = frappe.get_doc("Integration Request", existing_status_ir_name)
+			status_data = frappe.parse_json(status_ir.data) if status_ir.data else {}
+			poll_count = cint(status_data.get("poll_count") or 1) + 1
+		else:
+			poll_count = 1
+			status_data = {
+				"sale_order_id": order_id,
+				"merchantTransactionId": merchant_txn_id,
+				"terminal_id": terminal_id,
+				"payment_gateway": IR_SERVICE_STATUS,
+			}
+			status_ir = frappe.get_doc(
+				{
+					"doctype": "Integration Request",
+					"is_remote_request": 1,
+					"integration_request_service": IR_SERVICE_STATUS,
+					"status": "Queued",
+					"reference_doctype": ir.reference_doctype,
+					"reference_docname": ir.reference_docname,
+				}
+			)
+
+		status_data["poll_count"] = poll_count
+		status_data["request"] = None
+		description = f"{IR_DESCRIPTION_STATUS} #{poll_count}"
+
+		status_ir.request_description = description
+		status_ir.data = frappe.as_json(status_data)
+		if status_ir.is_new():
+			status_ir.insert(ignore_permissions=True)
+		else:
+			status_ir.save(ignore_permissions=True)
+		frappe.db.commit()  # nosemgrep — POS: persist status enquiry IR before API call
+
+		try:
+			response = _status_enquiry(merchant_txn_id, terminal_id)
+		except Exception:
+			self._mark_ir(status_ir.name, "Failed", output={"error": frappe.get_traceback()})
+			raise
+
 		status = result_status(response, context="status")
+		status_data["request"] = response.get("_request")
 		data["request"] = response.get("_request")
+
+		status_ir_status = {"success": "Completed", "pending": "Queued"}.get(status, "Failed")
+		self._mark_ir(status_ir.name, status_ir_status, output=response, data=status_data)
 
 		if status == "success":
 			data["result"] = normalize_sale_body(response)
@@ -243,10 +304,8 @@ class PayTMPOSSettings(Document):
 			frappe.throw(_("This sale has already been voided"))
 
 		status = self.poll_sale(order_id)
-		if status not in ("success", "pending"):
-			frappe.throw(
-				_("Cannot void: transaction status is {0}, expected success or pending").format(status)
-			)
+		if status not in ("success"):
+			frappe.throw(_("Cannot void: transaction status is {0}, expected success").format(status))
 
 		sale_ir = load_pos_ir(order_id)
 		sale_data = frappe.parse_json(sale_ir.data) if sale_ir.data else {}
@@ -364,19 +423,77 @@ class PayTMPOSSettings(Document):
 		}
 
 	def refund_status_for(self, refund_order_id: str) -> dict:
-		"""Poll a refund request and advance its Integration Request."""
+		"""Poll a refund request via Refund Status API and advance its Integration Request."""
 		self._require_api("refund_status_api")
 
 		ir = load_pos_ir(refund_order_id, service=IR_SERVICE_REFUND)
 		data = frappe.parse_json(ir.data) if ir.data else {}
 
-		response = _refund_status(data.get("paytm_order_id"), data.get("refId"))
+		paytm_order_id = data.get("paytm_order_id")
+		ref_id = data.get("refId")
+
+		# Find existing Refund Status Enquiry IR or create the first one for this refund attempt
+		existing_status_ir_name = frappe.db.get_value(
+			"Integration Request",
+			{
+				"reference_doctype": ir.reference_doctype,
+				"reference_docname": ir.reference_docname,
+				"integration_request_service": IR_SERVICE_REFUND_STATUS,
+			},
+			"name",
+			order_by="creation desc",
+		)
+
+		if existing_status_ir_name:
+			status_ir = frappe.get_doc("Integration Request", existing_status_ir_name)
+			status_data = frappe.parse_json(status_ir.data) if status_ir.data else {}
+			poll_count = cint(status_data.get("poll_count") or 1) + 1
+		else:
+			poll_count = 1
+			status_data = {
+				"refund_order_id": refund_order_id,
+				"paytm_order_id": paytm_order_id,
+				"refId": ref_id,
+				"payment_gateway": IR_SERVICE_REFUND_STATUS,
+			}
+			status_ir = frappe.get_doc(
+				{
+					"doctype": "Integration Request",
+					"is_remote_request": 1,
+					"integration_request_service": IR_SERVICE_REFUND_STATUS,
+					"status": "Queued",
+					"reference_doctype": ir.reference_doctype,
+					"reference_docname": ir.reference_docname,
+				}
+			)
+
+		status_data["poll_count"] = poll_count
+		status_data["request"] = None
+		description = f"{IR_DESCRIPTION_REFUND_STATUS} #{poll_count}"
+
+		status_ir.request_description = description
+		status_ir.data = frappe.as_json(status_data)
+		if status_ir.is_new():
+			status_ir.insert(ignore_permissions=True)
+		else:
+			status_ir.save(ignore_permissions=True)
+		frappe.db.commit()  # nosemgrep — POS: persist refund status enquiry IR before API call
+
+		try:
+			response = _refund_status(paytm_order_id, ref_id)
+		except Exception:
+			self._mark_ir(status_ir.name, "Failed", output={"error": frappe.get_traceback()})
+			raise
+
 		rstatus = refund_result_status(response)
+		status_data["request"] = response.get("_request")
 		data["request"] = response.get("_request")
 
+		status_ir_status = {"success": "Completed", "pending": "Queued"}.get(rstatus, "Failed")
+		self._mark_ir(status_ir.name, status_ir_status, output=response, data=status_data)
+
 		if ir.status not in ("Completed", "Failed"):
-			ir_status = {"success": "Completed", "pending": "Queued"}.get(rstatus, "Failed")
-			self._mark_ir(ir.name, ir_status, output=response, data=data)
+			self._mark_ir(ir.name, status_ir_status, output=response, data=data)
 		else:
 			self._mark_ir(ir.name, ir.status, output=response, data=data)
 
