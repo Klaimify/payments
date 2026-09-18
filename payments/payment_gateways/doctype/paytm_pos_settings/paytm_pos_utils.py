@@ -28,10 +28,14 @@ REFUND_PATH = "/refund/apply"
 REFUND_STATUS_PATH = "/v2/refund/status"
 
 IR_SERVICE = "PayTM POS"
+IR_SERVICE_STATUS = "PayTM POS Status"
 IR_SERVICE_REFUND = "PayTM POS Refund"
+IR_SERVICE_REFUND_STATUS = "PayTM POS Refund Status"
 
 IR_DESCRIPTION_SALE = "POS Payment (Paytm EDC)"
+IR_DESCRIPTION_STATUS = "POS Status Enquiry"
 IR_DESCRIPTION_REFUND = "POS Refund (Paytm EDC)"
+IR_DESCRIPTION_REFUND_STATUS = "POS Refund Status Enquiry"
 IR_DESCRIPTION_VOID = "POS Payment VOID"
 
 # Sale Registers as Failed after SALE_GRACE_MINUTES,
