@@ -43,6 +43,7 @@ from payments.payment_gateways.doctype.paytm_pos_settings.paytm_pos_utils import
 	generate_checksum,
 	generate_merchant_txn_id,
 	get_enabled_terminals,
+	get_merchant_key,
 	get_paytm_pos_config,
 	get_terminal,
 	ir_age_minutes,
@@ -70,8 +71,20 @@ class PayTMPOSSettings(Document):
 		if not (self.channel_id or "").strip():
 			frappe.throw(_("Channel ID is required"))
 
-		if not (self.merchant_key or "").strip():
-			frappe.throw(_("Merchant Key is required"))
+		if not self.multi_branch_setup:
+			if not (self.get_password("merchant_key", raise_exception=False) or "").strip():
+				frappe.throw(_("Merchant Key is required"))
+		else:
+			for row in self.pos_devices:
+				if (
+					row.enabled
+					and not (row.get_password("merchant_key", raise_exception=False) or "").strip()
+				):
+					frappe.throw(
+						_("Merchant Key is required for enabled POS Device '{0}'").format(
+							row.terminal_name or row.terminal_id
+						)
+					)
 
 		if self.timeout_configuration:
 			if not (1 <= cint(self.timeout_configuration) <= 60):
@@ -405,8 +418,12 @@ class PayTMPOSSettings(Document):
 		refund_ir.insert(ignore_permissions=True)
 		frappe.db.commit()  # nosemgrep — POS: persist refund IR before API call
 
+		terminal_id = data.get("terminal_id")
+
 		try:
-			response = _refund_request(paytm_order_id, paytm_txn_id, ref_id, refund_amount)
+			response = _refund_request(
+				paytm_order_id, paytm_txn_id, ref_id, refund_amount, terminal_name=terminal_id
+			)
 		except Exception:
 			self._mark_ir(refund_ir.name, "Failed", output={"error": frappe.get_traceback()})
 			raise
@@ -479,8 +496,10 @@ class PayTMPOSSettings(Document):
 			status_ir.save(ignore_permissions=True)
 		frappe.db.commit()  # nosemgrep — POS: persist refund status enquiry IR before API call
 
+		terminal_id = data.get("terminal_id")
+
 		try:
-			response = _refund_status(paytm_order_id, ref_id)
+			response = _refund_status(paytm_order_id, ref_id, terminal_name=terminal_id)
 		except Exception:
 			self._mark_ir(status_ir.name, "Failed", output={"error": frappe.get_traceback()})
 			raise
@@ -532,7 +551,7 @@ def _sale_request(
 	if timeout_val:
 		body["timeoutConfig"] = timeout_val
 
-	head = build_head(config, body)
+	head = build_head(config, body, terminal_id=terminal["terminal_id"])
 	response = call(config["sale_endpoint"], head, body)
 	_logger.info("Paytm POS Sale %s -> %s", merchant_transaction_id, result(response)["result_status"])
 	return response
@@ -549,7 +568,7 @@ def _status_enquiry(merchant_transaction_id: str, terminal_name: str | None = No
 		"transactionDateTime": now_string(),
 		"merchantTransactionId": merchant_transaction_id,
 	}
-	head = build_head(config, body)
+	head = build_head(config, body, terminal_id=terminal["terminal_id"])
 	response = call(config["status_endpoint"], head, body)
 	_logger.info("Paytm POS Status %s -> %s", merchant_transaction_id, result(response)["result_status"])
 	return response
@@ -566,15 +585,18 @@ def _void_transaction(merchant_transaction_id: str, terminal_name: str | None = 
 		"merchantTransactionId": merchant_transaction_id,
 		"transactionDateTime": now_string(),
 	}
-	head = build_head(config, body)
+	head = build_head(config, body, terminal_id=terminal["terminal_id"])
 	response = call(config["void_endpoint"], head, body)
 	_logger.info("Paytm POS Void %s -> %s", merchant_transaction_id, result(response)["result_status"])
 	return response
 
 
-def _refund_request(paytm_order_id: str, paytm_txn_id: str, ref_id: str, refund_amount: str) -> dict:
+def _refund_request(
+	paytm_order_id: str, paytm_txn_id: str, ref_id: str, refund_amount: str, terminal_name: str | None = None
+) -> dict:
 	"""Initiate a refund for a successful transaction."""
 	config = get_paytm_pos_config()
+	merchant_key = get_merchant_key(config, terminal_name)
 
 	body = {
 		"mid": config["merchant_id"],
@@ -587,7 +609,7 @@ def _refund_request(paytm_order_id: str, paytm_txn_id: str, ref_id: str, refund_
 	head = {
 		"requestTimeStamp": now_string(),
 		"channelId": config["channel_id"],
-		"checksum": generate_checksum(checksum_body(body), config["merchant_key"]),
+		"checksum": generate_checksum(checksum_body(body), merchant_key),
 		"version": "1.0",
 	}
 	response = call(config["refund_endpoint"], head, body)
@@ -595,9 +617,10 @@ def _refund_request(paytm_order_id: str, paytm_txn_id: str, ref_id: str, refund_
 	return response
 
 
-def _refund_status(paytm_order_id: str, ref_id: str) -> dict:
+def _refund_status(paytm_order_id: str, ref_id: str, terminal_name: str | None = None) -> dict:
 	"""Check status of a refund request."""
 	config = get_paytm_pos_config()
+	merchant_key = get_merchant_key(config, terminal_name)
 
 	body = {
 		"mid": config["merchant_id"],
@@ -607,7 +630,7 @@ def _refund_status(paytm_order_id: str, ref_id: str) -> dict:
 	head = {
 		"requestTimeStamp": now_string(),
 		"channelId": config["channel_id"],
-		"checksum": generate_checksum(checksum_body(body), config["merchant_key"]),
+		"checksum": generate_checksum(checksum_body(body), merchant_key),
 		"version": "1.0",
 	}
 	response = call(config["refund_status_endpoint"], head, body)

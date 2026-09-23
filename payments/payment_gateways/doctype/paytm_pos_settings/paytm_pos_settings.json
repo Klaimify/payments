@@ -8,8 +8,9 @@
  "field_order": [
   "paytm_configuration_section",
   "merchant_id",
-  "merchant_key",
   "staging",
+  "multi_branch_setup",
+  "merchant_key",
   "column_break_jugq",
   "channel_id",
   "timeout_configuration",
@@ -31,13 +32,6 @@
    "fieldtype": "Data",
    "in_list_view": 1,
    "label": "Merchant ID",
-   "reqd": 1
-  },
-  {
-   "fieldname": "merchant_key",
-   "fieldtype": "Password",
-   "in_list_view": 1,
-   "label": "Merchant Key",
    "reqd": 1
   },
   {
@@ -135,13 +129,27 @@
   {
    "fieldname": "column_break_yjrt",
    "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "merchant_key",
+   "fieldtype": "Password",
+   "label": "Merchant Key",
+   "mandatory_depends_on": "eval:!doc.multi_branch_setup;",
+   "mask": 1
+  },
+  {
+   "default": "0",
+   "description": "Enable if different POS terminals use distinct Paytm Merchant Keys across branches or counters.",
+   "fieldname": "multi_branch_setup",
+   "fieldtype": "Check",
+   "label": "Enable Multi-Branch Setup"
   }
  ],
  "grid_page_length": 50,
  "index_web_pages_for_search": 1,
  "issingle": 1,
  "links": [],
- "modified": "2026-09-01 11:27:36.708528",
+ "modified": "2026-09-23 15:17:22.869256",
  "modified_by": "Administrator",
  "module": "Payment Gateways",
  "name": "PayTM POS Settings",
