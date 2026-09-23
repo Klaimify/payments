@@ -8,7 +8,10 @@
  "field_order": [
   "enabled",
   "terminal_id",
-  "terminal_name"
+  "merchant_key",
+  "terminal_name",
+  "device_serial_id",
+  "activation_code"
  ],
  "fields": [
   {
@@ -31,14 +34,41 @@
    "fieldtype": "Data",
    "in_list_view": 1,
    "label": "Terminal Name",
-   "reqd": 1
+   "reqd": 1,
+   "sticky": 1
+  },
+  {
+   "depends_on": "eval:parent.multi_branch_setup == 1;",
+   "fieldname": "merchant_key",
+   "fieldtype": "Password",
+   "in_list_view": 1,
+   "label": "Merchant Key",
+   "mandatory_depends_on": "eval:parent.multi_branch_setup;",
+   "mask": 1,
+   "sticky": 1
+  },
+  {
+   "fieldname": "device_serial_id",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Device Serial ID",
+   "placeholder": "Optional",
+   "sticky": 1
+  },
+  {
+   "fieldname": "activation_code",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Activation Code",
+   "placeholder": "Optional",
+   "sticky": 1
   }
  ],
  "grid_page_length": 50,
  "index_web_pages_for_search": 1,
  "istable": 1,
  "links": [],
- "modified": "2026-08-17 15:02:22.621108",
+ "modified": "2026-09-23 12:23:53.926601",
  "modified_by": "Administrator",
  "module": "Payment Gateways",
  "name": "POS Devices",
