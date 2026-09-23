@@ -101,11 +101,12 @@ def checksum_body(body: dict) -> dict:
 	return result
 
 
-def build_head(config: dict, body: dict) -> dict:
+def build_head(config: dict, body: dict, terminal_id: str | None = None) -> dict:
+	merchant_key = get_merchant_key(config, terminal_id)
 	return {
 		"requestTimeStamp": now_string(),
 		"channelId": config["channel_id"],
-		"checksum": generate_checksum(checksum_body(body), config["merchant_key"]),
+		"checksum": generate_checksum(checksum_body(body), merchant_key),
 		"version": "1.0",
 	}
 
@@ -273,9 +274,18 @@ def get_paytm_pos_config() -> dict:
 	"""PayTM POS Settings as a dict: merchant key decrypted, host/endpoints
 	resolved from the ``staging`` flag."""
 	config = frappe.db.get_singles_dict("PayTM POS Settings")
-	config.update(
-		{"merchant_key": get_decrypted_password("PayTM POS Settings", "PayTM POS Settings", "merchant_key")}
-	)
+	merchant_key = ""
+	try:
+		merchant_key = (
+			get_decrypted_password(
+				"PayTM POS Settings", "PayTM POS Settings", "merchant_key", raise_exception=False
+			)
+			or ""
+		)
+	except Exception:
+		merchant_key = ""
+
+	config.update({"merchant_key": merchant_key})
 
 	host = STAGING_HOST if cint(config.get("staging")) else PRODUCTION_HOST
 	refund_host = STAGING_REFUND_HOST if cint(config.get("staging")) else PRODUCTION_REFUND_HOST
@@ -290,6 +300,23 @@ def get_paytm_pos_config() -> dict:
 		}
 	)
 	return config
+
+
+def get_merchant_key(config: dict, terminal_id: str | None = None) -> str:
+	"""Return the appropriate merchant key.
+
+	If multi_branch_setup is active and a terminal_id is provided, return that device's
+	decrypted merchant_key. Otherwise fall back to the global merchant_key from config.
+	"""
+	if cint(config.get("multi_branch_setup")) and terminal_id:
+		settings = frappe.get_single("PayTM POS Settings")
+		for device in settings.pos_devices:
+			if device.enabled and (device.terminal_id == terminal_id or device.terminal_name == terminal_id):
+				device_key = device.get_password("merchant_key", raise_exception=False)
+				if device_key:
+					return device_key
+
+	return config.get("merchant_key") or ""
 
 
 def get_enabled_terminals() -> list[dict]:
