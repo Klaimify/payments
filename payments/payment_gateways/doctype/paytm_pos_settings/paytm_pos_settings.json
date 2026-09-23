@@ -8,9 +8,9 @@
  "field_order": [
   "paytm_configuration_section",
   "merchant_id",
-  "merchant_key",
   "staging",
   "multi_branch_setup",
+  "merchant_key",
   "column_break_jugq",
   "channel_id",
   "timeout_configuration",
@@ -131,7 +131,6 @@
    "fieldtype": "Column Break"
   },
   {
-   "depends_on": "eval:!doc.multi_branch_setup;",
    "fieldname": "merchant_key",
    "fieldtype": "Password",
    "label": "Merchant Key",
@@ -150,7 +149,7 @@
  "index_web_pages_for_search": 1,
  "issingle": 1,
  "links": [],
- "modified": "2026-09-23 12:21:03.259671",
+ "modified": "2026-09-23 15:17:22.869256",
  "modified_by": "Administrator",
  "module": "Payment Gateways",
  "name": "PayTM POS Settings",
