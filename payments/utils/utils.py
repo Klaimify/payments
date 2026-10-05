@@ -30,6 +30,11 @@ def request_relative_url(path: str = "") -> str:
 	host_url = getattr(request, "host_url", None) if request else None
 	if host_url:
 		base = host_url.rstrip("/")
+		# TLS is usually terminated at a proxy, so the app sees plain http;
+		# gateways need https for any non-local host.
+		host = base.split("://", 1)[-1].split(":")[0]
+		if base.startswith("http://") and host not in ("localhost", "127.0.0.1") and not host.endswith(".localhost"):
+			base = "https://" + base[len("http://") :]
 		return f"{base}/{path.lstrip('/')}" if path else base
 	from frappe.utils import get_url
 
